@@ -13,15 +13,21 @@ pub trait Ingest {
     ) -> Result<TreeArena>;
 }
 
-// Submodules for per-format adapters + builders (directories with mod.rs)
-pub mod json;
-pub mod text;
-pub mod yaml;
+// Format adapters and builders live under `formats/`.
+pub mod formats;
 
-// Re-export commonly used helpers for convenience (keep adapter types private)
-pub use json::{parse_json_many, parse_json_one};
-pub use text::{parse_text_many, parse_text_one};
-pub use yaml::{parse_yaml_many, parse_yaml_one};
+// Use `crate::ingest::formats::{json,yaml,text}` for format-specific helpers.
+
+// Ingest-agnostic helpers (e.g., array sampling policies).
+pub mod sampling;
+
+// Convenience re-exports so callers can use `crate::ingest::parse_*`.
+pub use formats::{
+    parse_json_many, parse_json_one, parse_text_many, parse_text_one,
+    parse_yaml_many, parse_yaml_one,
+};
+
+// (intentionally no duplicate re-exports here; see formats::* above)
 
 #[cfg(test)]
 mod tests {
