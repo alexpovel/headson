@@ -3,7 +3,6 @@
     reason = "Dependency graph pulls distinct versions (e.g., yaml-rust2)."
 )]
 use std::fs::File;
-use std::io::IsTerminal as _;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -23,7 +22,14 @@ type IgnoreNotices = Vec<String>;
 )]
 struct Cli {
     #[arg(short = 'c', long = "bytes")]
-    budget: Option<usize>,
+    bytes: Option<usize>,
+    #[arg(
+        short = 'n',
+        long = "lines",
+        value_name = "LINES",
+        help = "Per-file line budget (adds up across files if --global-lines not set)"
+    )]
+    lines: Option<usize>,
     #[arg(
         short = 'f',
         long = "format",
@@ -47,7 +53,7 @@ struct Cli {
     #[arg(
         long = "no-newline",
         default_value_t = false,
-        help = "Do not add newlines in the output"
+        help = "Do not add newlines in the output. With --lines/--global-lines, line counts reflect actual breaks; without newlines, any non-empty output counts as a single line."
     )]
     no_newline: bool,
     #[arg(
@@ -68,9 +74,16 @@ struct Cli {
         short = 'C',
         long = "global-bytes",
         value_name = "BYTES",
-        help = "Total output budget across all inputs. When combined with --bytes, the effective global limit is the smaller of the two."
+        help = "Total byte budget across all inputs. When combined with --bytes, the effective global limit is the smaller of the two."
     )]
-    global_budget: Option<usize>,
+    global_bytes: Option<usize>,
+    #[arg(
+        short = 'N',
+        long = "global-lines",
+        value_name = "LINES",
+        help = "Total line budget across all inputs"
+    )]
+    global_lines: Option<usize>,
     #[arg(
         long = "tail",
         default_value_t = false,
@@ -141,9 +154,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let render_cfg = get_render_config_from(&cli);
-    // Resolve color auto-detection now (stdout is the surface for user output).
-    let _color_enabled =
-        render_cfg.color_mode.effective(io::stdout().is_terminal());
     let (output, ignore_notices) = if cli.inputs.is_empty() {
         (run_from_stdin(&cli, &render_cfg)?, Vec::new())
     } else {
@@ -158,12 +168,42 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn compute_effective_budget(cli: &Cli, input_count: usize) -> usize {
-    match (cli.global_budget, cli.budget) {
+// Build budgets from CLI flags. If only line caps are provided, avoid imposing
+// the default byte cap; keep the 500-byte default only when neither lines nor
+// bytes are specified. If any byte-related flag is present, enforce bytes.
+fn make_budgets(
+    cli: &Cli,
+    eff_bytes: usize,
+    eff_lines: Option<usize>,
+) -> headson::Budgets {
+    let byte_budget = if cli.bytes.is_some() || cli.global_bytes.is_some() {
+        Some(eff_bytes)
+    } else if cli.lines.is_some() || cli.global_lines.is_some() {
+        None
+    } else {
+        Some(eff_bytes)
+    };
+    headson::Budgets {
+        byte_budget,
+        line_budget: eff_lines,
+    }
+}
+
+fn compute_effective_bytes(cli: &Cli, input_count: usize) -> usize {
+    match (cli.global_bytes, cli.bytes) {
         (Some(g), Some(n)) => g.min(n.saturating_mul(input_count)),
         (Some(g), None) => g,
         (None, Some(n)) => n.saturating_mul(input_count),
         (None, None) => 500usize.saturating_mul(input_count),
+    }
+}
+
+fn compute_effective_lines(cli: &Cli, input_count: usize) -> Option<usize> {
+    match (cli.global_lines, cli.lines) {
+        (Some(g), Some(n)) => Some(g.min(n.saturating_mul(input_count))),
+        (Some(g), None) => Some(g),
+        (None, Some(n)) => Some(n.saturating_mul(input_count)),
+        (None, None) => None,
     }
 }
 
@@ -173,15 +213,58 @@ fn compute_priority(
     input_count: usize,
 ) -> headson::PriorityConfig {
     let per_file_for_priority =
-        if cli.global_budget.is_some() && cli.budget.is_some() {
+        if cli.global_bytes.is_some() && cli.bytes.is_some() {
             // When both limits are provided, base per-file heuristics on the per-file
             // budget but also respect the effective per-file slice of the final global.
             let eff_per_file = (effective_budget / input_count.max(1)).max(1);
-            cli.budget.unwrap().min(eff_per_file).max(1)
+            cli.bytes.unwrap().min(eff_per_file).max(1)
         } else {
             (effective_budget / input_count.max(1)).max(1)
         };
     get_priority_config(per_file_for_priority, cli)
+}
+
+fn any_yaml_ext(entries: &InputEntries) -> bool {
+    entries.iter().any(|(name, _)| {
+        let lower = name.to_ascii_lowercase();
+        lower.ends_with(".yaml") || lower.ends_with(".yml")
+    })
+}
+
+fn all_json_ext(entries: &InputEntries) -> bool {
+    entries
+        .iter()
+        .all(|(name, _)| name.to_ascii_lowercase().ends_with(".json"))
+}
+
+fn choose_input_format_fileset(
+    cli: &Cli,
+    entries: &InputEntries,
+) -> InputFormat {
+    if matches!(cli.format, OutputFormat::Auto) {
+        if any_yaml_ext(entries) {
+            InputFormat::Yaml
+        } else if all_json_ext(entries) {
+            InputFormat::Json
+        } else {
+            // Mixed or unknown extensions: treat as text to avoid JSON/YAML parse errors
+            InputFormat::Text
+        }
+    } else {
+        cli.input_format
+    }
+}
+
+fn effective_fileset_template(
+    cli: &Cli,
+    style: headson::Style,
+) -> headson::OutputTemplate {
+    match cli.format {
+        OutputFormat::Auto => headson::OutputTemplate::Auto,
+        OutputFormat::Json => map_json_template_for_style(style),
+        OutputFormat::Yaml => headson::OutputTemplate::Yaml,
+        OutputFormat::Text => headson::OutputTemplate::Text,
+    }
 }
 
 fn run_from_stdin(
@@ -190,19 +273,33 @@ fn run_from_stdin(
 ) -> Result<String> {
     let input_bytes = read_stdin()?;
     let input_count = 1usize;
-    let eff = compute_effective_budget(cli, input_count);
+    let eff = compute_effective_bytes(cli, input_count);
+    let eff_lines = compute_effective_lines(cli, input_count);
     let prio = compute_priority(cli, eff, input_count);
     let mut cfg = render_cfg.clone();
     // Resolve effective output template for stdin:
     cfg.template = resolve_effective_template_for_stdin(cli.format, cfg.style);
+    let budgets = make_budgets(cli, eff, eff_lines);
+    // Enable free string prefix when in line-only mode
+    if budgets.byte_budget.is_none() && budgets.line_budget.is_some() {
+        cfg.string_free_prefix_graphemes = Some(40);
+    }
     match cli.input_format {
-        InputFormat::Json => headson::headson(input_bytes, &cfg, &prio, eff),
-        InputFormat::Yaml => {
-            headson::headson_yaml(input_bytes, &cfg, &prio, eff)
+        InputFormat::Json => {
+            headson::headson_with_budgets(input_bytes, &cfg, &prio, budgets)
         }
-        InputFormat::Text => {
-            headson::headson_text(input_bytes, &cfg, &prio, eff)
-        }
+        InputFormat::Yaml => headson::headson_yaml_with_budgets(
+            input_bytes,
+            &cfg,
+            &prio,
+            budgets,
+        ),
+        InputFormat::Text => headson::headson_text_with_budgets(
+            input_bytes,
+            &cfg,
+            &prio,
+            budgets,
+        ),
     }
 }
 
@@ -217,53 +314,28 @@ fn run_from_paths(
     let (entries, ignored) = ingest_paths(&cli.inputs)?;
     let included = entries.len();
     let input_count = included.max(1);
-    let eff = compute_effective_budget(cli, input_count);
+    let eff = compute_effective_bytes(cli, input_count);
+    let eff_lines = compute_effective_lines(cli, input_count);
     let prio = compute_priority(cli, eff, input_count);
-    // In Auto template mode, choose ingestion strategy based on extensions for filesets:
-    // if any included input has a YAML extension, prefer YAML ingest (can parse JSON too).
-    fn any_yaml_ext(entries: &InputEntries) -> bool {
-        entries.iter().any(|(name, _)| {
-            let lower = name.to_ascii_lowercase();
-            lower.ends_with(".yaml") || lower.ends_with(".yml")
-        })
-    }
-    fn all_json_ext(entries: &InputEntries) -> bool {
-        entries.iter().all(|(name, _)| {
-            let lower = name.to_ascii_lowercase();
-            lower.ends_with(".json")
-        })
-    }
     if cli.inputs.len() > 1 {
-        let chosen_input = if matches!(cli.format, OutputFormat::Auto) {
-            if any_yaml_ext(&entries) {
-                InputFormat::Yaml
-            } else if all_json_ext(&entries) {
-                InputFormat::Json
-            } else {
-                // Mixed or unknown extensions: treat as text to avoid JSON/YAML parse errors
-                InputFormat::Text
-            }
-        } else {
-            cli.input_format
-        };
+        let chosen_input = choose_input_format_fileset(cli, &entries);
         let mut cfg = render_cfg.clone();
         // For filesets: if format=auto, enable per-file template selection.
-        cfg.template = match cli.format {
-            OutputFormat::Auto => headson::OutputTemplate::Auto,
-            OutputFormat::Json => map_json_template_for_style(cfg.style),
-            OutputFormat::Yaml => headson::OutputTemplate::Yaml,
-            OutputFormat::Text => headson::OutputTemplate::Text,
-        };
+        cfg.template = effective_fileset_template(cli, cfg.style);
+        let budgets = make_budgets(cli, eff, eff_lines);
+        if budgets.byte_budget.is_none() && budgets.line_budget.is_some() {
+            cfg.string_free_prefix_graphemes = Some(40);
+        }
         let out = match chosen_input {
-            InputFormat::Json => {
-                headson::headson_many(entries, &cfg, &prio, eff)?
-            }
-            InputFormat::Yaml => {
-                headson::headson_many_yaml(entries, &cfg, &prio, eff)?
-            }
-            InputFormat::Text => {
-                headson::headson_many_text(entries, &cfg, &prio, eff)?
-            }
+            InputFormat::Json => headson::headson_many_with_budgets(
+                entries, &cfg, &prio, budgets,
+            )?,
+            InputFormat::Yaml => headson::headson_many_yaml_with_budgets(
+                entries, &cfg, &prio, budgets,
+            )?,
+            InputFormat::Text => headson::headson_many_text_with_budgets(
+                entries, &cfg, &prio, budgets,
+            )?,
         };
         Ok((out, ignored))
     } else if included == 0 {
@@ -289,14 +361,20 @@ fn run_from_paths(
         cfg.template = resolve_effective_template_for_single(
             cli.format, cfg.style, &lower,
         );
+        let budgets = make_budgets(cli, eff, eff_lines);
+        if budgets.byte_budget.is_none() && budgets.line_budget.is_some() {
+            cfg.string_free_prefix_graphemes = Some(40);
+        }
         let out = match chosen_input {
-            InputFormat::Json => headson::headson(bytes, &cfg, &prio, eff)?,
-            InputFormat::Yaml => {
-                headson::headson_yaml(bytes, &cfg, &prio, eff)?
+            InputFormat::Json => {
+                headson::headson_with_budgets(bytes, &cfg, &prio, budgets)?
             }
-            InputFormat::Text => {
-                headson::headson_text(bytes, &cfg, &prio, eff)?
-            }
+            InputFormat::Yaml => headson::headson_yaml_with_budgets(
+                bytes, &cfg, &prio, budgets,
+            )?,
+            InputFormat::Text => headson::headson_text_with_budgets(
+                bytes, &cfg, &prio, budgets,
+            )?,
         };
         Ok((out, ignored))
     }
@@ -410,6 +488,7 @@ fn get_render_config_from(cli: &Cli) -> headson::RenderConfig {
         color_mode,
         color_enabled,
         style: map_style(cli.style),
+        string_free_prefix_graphemes: None,
     }
 }
 
@@ -417,6 +496,10 @@ fn get_priority_config(
     per_file_budget: usize,
     cli: &Cli,
 ) -> headson::PriorityConfig {
+    // Detect line-only mode: lines flag present and no explicit bytes flags.
+    let line_only = (cli.lines.is_some() || cli.global_lines.is_some())
+        && cli.bytes.is_none()
+        && cli.global_bytes.is_none();
     headson::PriorityConfig {
         max_string_graphemes: cli.string_cap,
         array_max_items: (per_file_budget / 2).max(1),
@@ -429,6 +512,7 @@ fn get_priority_config(
         } else {
             headson::ArraySamplerStrategy::Default
         },
+        line_budget_only: line_only,
     }
 }
 

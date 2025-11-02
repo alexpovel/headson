@@ -59,6 +59,7 @@ fn render_config_with_sampler(
         color_mode: ColorMode::Auto,
         color_enabled: false,
         style: s,
+        string_free_prefix_graphemes: None,
     })
 }
 
@@ -85,6 +86,7 @@ fn priority_config(
         prefer_tail_arrays,
         array_bias: headson_core::ArrayBias::HeadMidTail,
         array_sampler: sampler,
+        line_budget_only: false,
     }
 }
 
@@ -93,19 +95,19 @@ fn to_pyerr(e: anyhow::Error) -> PyErr {
 }
 
 #[pyfunction]
-#[pyo3(signature = (text, *, format="auto", style="default", character_budget=None, skew="balanced", input_format="json"))]
+#[pyo3(signature = (text, *, format="auto", style="default", byte_budget=None, skew="balanced", input_format="json"))]
 fn summarize(
     py: Python<'_>,
     text: &str,
     format: &str,
     style: &str,
-    character_budget: Option<usize>,
+    byte_budget: Option<usize>,
     skew: &str,
     input_format: &str,
 ) -> PyResult<String> {
     let sampler = parse_skew(skew).map_err(to_pyerr)?;
     let cfg = render_config_with_sampler(format, style, sampler).map_err(to_pyerr)?;
-    let budget = character_budget.unwrap_or(500);
+    let budget = byte_budget.unwrap_or(500);
     let per_file_for_priority = budget.max(1);
     let prio = priority_config(per_file_for_priority, sampler);
     let input = text.as_bytes().to_vec();

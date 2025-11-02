@@ -7,6 +7,10 @@ pub struct PriorityConfig {
     pub array_bias: ArrayBias,
     // Array pre-sampling strategy.
     pub array_sampler: ArraySamplerStrategy,
+    // True when a lines-only budget is active (line cap with no byte cap).
+    // Indicates that rendering may favor structural breadth over deep string
+    // expansion under line-capped previews.
+    pub line_budget_only: bool,
 }
 
 impl PriorityConfig {
@@ -17,6 +21,7 @@ impl PriorityConfig {
             prefer_tail_arrays: false,
             array_bias: ArrayBias::HeadMidTail,
             array_sampler: ArraySamplerStrategy::Default,
+            line_budget_only: false,
         }
     }
 }
