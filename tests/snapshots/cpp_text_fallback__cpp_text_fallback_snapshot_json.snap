@@ -1,0 +1,13 @@
+---
+source: tests/cpp_text_fallback.rs
+expression: out
+---
+[
+  "#include <iostream>",
+  …
+  "    for (int i = 0; i < 5; ++…",
+  "        if (i % 2 == 0) {",
+  …
+  ""
+  …
+]

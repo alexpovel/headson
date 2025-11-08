@@ -1,4 +1,4 @@
-use crate::order::NodeKind;
+use crate::{ArrayBias, order::NodeKind};
 
 #[derive(Debug, Default, Clone)]
 pub struct JsonTreeArena {
@@ -30,6 +30,9 @@ pub struct JsonTreeNode {
     // the kept children for this array node.
     pub arr_indices_start: usize,
     pub arr_indices_len: usize,
+    pub array_bias_override: Option<ArrayBias>,
+    pub force_first_line: bool,
+    pub prefers_parent_line: bool,
 }
 
 impl Default for JsonTreeNode {
@@ -46,6 +49,9 @@ impl Default for JsonTreeNode {
             object_len: None,
             arr_indices_start: 0,
             arr_indices_len: 0,
+            array_bias_override: None,
+            force_first_line: false,
+            prefers_parent_line: false,
         }
     }
 }

@@ -5,7 +5,10 @@ use crate::utils::tree_arena::{JsonTreeArena, JsonTreeNode};
 
 use super::formats::{
     json::build_json_tree_arena_from_bytes,
-    text::build_text_tree_arena_from_bytes,
+    text::{
+        build_text_tree_arena_from_bytes,
+        build_text_tree_arena_from_bytes_with_mode,
+    },
     yaml::build_yaml_tree_arena_from_bytes,
 };
 use crate::PriorityConfig;
@@ -22,7 +25,7 @@ pub struct FilesetInput {
 pub enum FilesetInputKind {
     Json,
     Yaml,
-    Text,
+    Text { atomic_lines: bool },
 }
 
 pub fn parse_fileset_multi(
@@ -39,8 +42,14 @@ pub fn parse_fileset_multi(
             FilesetInputKind::Yaml => {
                 build_yaml_tree_arena_from_bytes(bytes, cfg)?
             }
-            FilesetInputKind::Text => {
-                build_text_tree_arena_from_bytes(bytes, cfg)?
+            FilesetInputKind::Text { atomic_lines } => {
+                if atomic_lines {
+                    build_text_tree_arena_from_bytes_with_mode(
+                        bytes, cfg, true,
+                    )?
+                } else {
+                    build_text_tree_arena_from_bytes(bytes, cfg)?
+                }
             }
         };
         arenas.push((name, arena));
@@ -48,7 +57,7 @@ pub fn parse_fileset_multi(
     Ok(build_fileset_root(arenas))
 }
 
-fn build_fileset_root(
+pub(crate) fn build_fileset_root(
     mut items: Vec<(String, JsonTreeArena)>,
 ) -> JsonTreeArena {
     let mut arena = JsonTreeArena {

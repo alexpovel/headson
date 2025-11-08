@@ -22,9 +22,48 @@ pub(crate) struct RenderScope<'a> {
     render_set_id: u32,
     // Rendering configuration (template, whitespace, etc.).
     config: &'a crate::RenderConfig,
+    // Optional global width for line number alignment when enabled.
+    line_number_width: Option<usize>,
 }
 
 impl<'a> RenderScope<'a> {
+    fn is_text_omission_line(
+        style: crate::serialization::types::Style,
+        raw: &str,
+    ) -> bool {
+        let s = raw.trim();
+        if s.is_empty() {
+            return true;
+        }
+        match style {
+            // Default: a single omission marker
+            crate::serialization::types::Style::Default => s == "…",
+            // Detailed: either single marker or "… N more lines …"
+            crate::serialization::types::Style::Detailed => {
+                if s == "…" {
+                    return true;
+                }
+                s.starts_with('…') && s.ends_with('…')
+            }
+            // Strict: arrays do not emit omission lines in text mode; treat empty-only as omission
+            crate::serialization::types::Style::Strict => s.is_empty(),
+        }
+    }
+
+    fn rendered_is_pure_text_omission(&self, rendered: &str) -> bool {
+        // Consider it pure omission if all non-empty lines match omission pattern for current style.
+        let mut any = false;
+        for line in rendered.split('\n') {
+            if line.trim().is_empty() {
+                continue;
+            }
+            any = true;
+            if !Self::is_text_omission_line(self.config.style, line) {
+                return false;
+            }
+        }
+        any
+    }
     fn push_array_child_line(
         &self,
         out: &mut Vec<ArrayChildPair>,
@@ -177,6 +216,7 @@ impl<'a> RenderScope<'a> {
         if matches!(
             self.config.template,
             crate::serialization::types::OutputTemplate::Text
+                | crate::serialization::types::OutputTemplate::Code
         ) {
             if omitted == 0 {
                 full.to_string()
@@ -227,6 +267,7 @@ impl<'a> RenderScope<'a> {
         if matches!(
             template,
             crate::serialization::types::OutputTemplate::Text
+                | crate::serialization::types::OutputTemplate::Code
         ) {
             if omitted == 0 {
                 full.to_string()
@@ -275,8 +316,9 @@ impl<'a> RenderScope<'a> {
                 if matches!(
                     self.config.template,
                     crate::serialization::types::OutputTemplate::Text
+                        | crate::serialization::types::OutputTemplate::Code
                 ) {
-                    // For text template, push raw string without quotes or color.
+                    // For text/code templates, push raw string without quotes or color.
                     out.push_str(&s);
                 } else {
                     out.push_string_literal(&s);
@@ -292,6 +334,10 @@ impl<'a> RenderScope<'a> {
         }
     }
 
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "Text omission filtering adds a branch; clearer inline"
+    )]
     fn gather_array_children(
         &mut self,
         id: usize,
@@ -304,10 +350,25 @@ impl<'a> RenderScope<'a> {
                 if self.inclusion_flags[child_id.0] != self.render_set_id {
                     continue;
                 }
-                kept += 1;
                 let child_kind = self.order.nodes[child_id.0].display_kind();
                 let rendered =
                     self.render_node_to_string(child_id.0, depth + 1, false);
+                // Text template: keep omission-only children so their own
+                // renderer can place markers at the correct indentation.
+                // Coalesce: if the previously kept child is also a pure
+                // omission, skip this one to avoid consecutive markers.
+                if matches!(
+                    self.config.template,
+                    crate::serialization::types::OutputTemplate::Text
+                ) && self.rendered_is_pure_text_omission(&rendered)
+                {
+                    if let Some((_pi, (_pk, prev_s))) = children_pairs.last() {
+                        if self.rendered_is_pure_text_omission(prev_s) {
+                            continue;
+                        }
+                    }
+                }
+                kept += 1;
                 let orig_index = self
                     .order
                     .index_in_parent_array
@@ -326,6 +387,10 @@ impl<'a> RenderScope<'a> {
         (children_pairs, kept)
     }
 
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "Text omission filtering adds a branch; clearer inline"
+    )]
     fn gather_array_children_with_template(
         &mut self,
         id: usize,
@@ -339,7 +404,6 @@ impl<'a> RenderScope<'a> {
                 if self.inclusion_flags[child_id.0] != self.render_set_id {
                     continue;
                 }
-                kept += 1;
                 let child_kind = self.order.nodes[child_id.0].display_kind();
                 let rendered = self.render_node_to_string_with_template(
                     child_id.0,
@@ -347,6 +411,18 @@ impl<'a> RenderScope<'a> {
                     false,
                     template,
                 );
+                if matches!(
+                    template,
+                    crate::serialization::types::OutputTemplate::Text
+                ) && self.rendered_is_pure_text_omission(&rendered)
+                {
+                    if let Some((_pi, (_pk, prev_s))) = children_pairs.last() {
+                        if self.rendered_is_pure_text_omission(prev_s) {
+                            continue;
+                        }
+                    }
+                }
+                kept += 1;
                 let orig_index = self
                     .order
                     .index_in_parent_array
@@ -427,25 +503,15 @@ impl<'a> RenderScope<'a> {
         match &self.order.nodes[id] {
             RankedNode::Array { .. } => {
                 let mut s = String::new();
-                let mut ow = Out::new(
-                    &mut s,
-                    &self.config.newline,
-                    &self.config.indent_unit,
-                    self.config.color_enabled,
-                    self.config.style,
-                );
+                let mut ow =
+                    Out::new(&mut s, self.config, self.line_number_width);
                 self.write_array(id, depth, inline, &mut ow);
                 s
             }
             RankedNode::Object { .. } => {
                 let mut s = String::new();
-                let mut ow = Out::new(
-                    &mut s,
-                    &self.config.newline,
-                    &self.config.indent_unit,
-                    self.config.color_enabled,
-                    self.config.style,
-                );
+                let mut ow =
+                    Out::new(&mut s, self.config, self.line_number_width);
                 self.write_object(id, depth, inline, &mut ow);
                 s
             }
@@ -519,13 +585,8 @@ impl<'a> RenderScope<'a> {
         match &self.order.nodes[id] {
             RankedNode::Array { .. } => {
                 let mut s = String::new();
-                let mut ow = Out::new(
-                    &mut s,
-                    &self.config.newline,
-                    &self.config.indent_unit,
-                    self.config.color_enabled,
-                    self.config.style,
-                );
+                let mut ow =
+                    Out::new(&mut s, self.config, self.line_number_width);
                 self.write_array_with_template(
                     id, depth, inline, &mut ow, template,
                 );
@@ -533,13 +594,8 @@ impl<'a> RenderScope<'a> {
             }
             RankedNode::Object { .. } => {
                 let mut s = String::new();
-                let mut ow = Out::new(
-                    &mut s,
-                    &self.config.newline,
-                    &self.config.indent_unit,
-                    self.config.color_enabled,
-                    self.config.style,
-                );
+                let mut ow =
+                    Out::new(&mut s, self.config, self.line_number_width);
                 self.write_object_with_template(
                     id, depth, inline, &mut ow, template,
                 );
@@ -558,6 +614,35 @@ impl<'a> RenderScope<'a> {
 
 /// Prepare a render set by including the first `top_k` nodes by priority
 /// and all of their ancestors so the output remains structurally valid.
+fn enforce_force_first_child(
+    order_build: &PriorityOrder,
+    inclusion_flags: &mut [u32],
+    render_id: u32,
+) {
+    for (idx, force) in order_build.force_first_child.iter().enumerate() {
+        let included =
+            inclusion_flags.get(idx).copied().unwrap_or_default() == render_id;
+        if !*force || !included {
+            continue;
+        }
+        let Some(children) = order_build.children.get(idx) else {
+            continue;
+        };
+        let Some(first_child) = children.first() else {
+            continue;
+        };
+        if inclusion_flags[first_child.0] == render_id {
+            continue;
+        }
+        crate::utils::graph::mark_node_and_ancestors(
+            order_build,
+            *first_child,
+            inclusion_flags,
+            render_id,
+        );
+    }
+}
+
 pub fn prepare_render_set_top_k_and_ancestors(
     order_build: &PriorityOrder,
     top_k: usize,
@@ -574,6 +659,7 @@ pub fn prepare_render_set_top_k_and_ancestors(
         inclusion_flags,
         render_id,
     );
+    enforce_force_first_child(order_build, inclusion_flags, render_id);
 }
 
 /// Render using a previously prepared render set (inclusion flags matching `render_id`).
@@ -584,20 +670,86 @@ pub fn render_from_render_set(
     config: &crate::RenderConfig,
 ) -> String {
     let root_id = ROOT_PQ_ID;
+    // Compute optional global line-number width when numbering is enabled for text.
+    fn digits(mut n: usize) -> usize {
+        if n == 0 {
+            return 1;
+        }
+        let mut d = 0;
+        while n > 0 {
+            d += 1;
+            n /= 10;
+        }
+        d
+    }
+    fn max_index_for_child(
+        order: &PriorityOrder,
+        flags: &[u32],
+        rid: u32,
+        child: usize,
+    ) -> Option<usize> {
+        if flags.get(child).copied().unwrap_or_default() != rid {
+            return None;
+        }
+        match order.nodes[child] {
+            RankedNode::AtomicLeaf { .. }
+            | RankedNode::SplittableLeaf { .. } => {
+                order.index_in_parent_array.get(child).and_then(|idx| *idx)
+            }
+            RankedNode::Array { .. } | RankedNode::Object { .. } => {
+                Some(compute_max_index(order, flags, rid, child))
+            }
+            _ => None,
+        }
+    }
+
+    fn compute_max_index(
+        order: &PriorityOrder,
+        flags: &[u32],
+        rid: u32,
+        id: usize,
+    ) -> usize {
+        let mut max_idx = 0usize;
+        if let Some(kids) = order.children.get(id) {
+            for &cid in kids.iter() {
+                let child_id = cid.0;
+                if let Some(child_max) =
+                    max_index_for_child(order, flags, rid, child_id)
+                {
+                    if child_max > max_idx {
+                        max_idx = child_max;
+                    }
+                }
+            }
+        }
+        max_idx
+    }
+    let root_is_fileset =
+        order_build.object_type.get(root_id) == Some(&ObjectType::Fileset);
+    let should_measure_line_numbers =
+        matches!(config.template, crate::OutputTemplate::Code)
+            || (matches!(config.template, crate::OutputTemplate::Auto)
+                && root_is_fileset);
+    let line_number_width = if should_measure_line_numbers {
+        let max_index = compute_max_index(
+            order_build,
+            inclusion_flags,
+            render_id,
+            root_id,
+        );
+        Some(digits(max_index.saturating_add(1)))
+    } else {
+        None
+    };
     let mut scope = RenderScope {
         order: order_build,
         inclusion_flags,
         render_set_id: render_id,
         config,
+        line_number_width,
     };
     let mut s = String::new();
-    let mut out = Out::new(
-        &mut s,
-        &config.newline,
-        &config.indent_unit,
-        config.color_enabled,
-        config.style,
-    );
+    let mut out = Out::new(&mut s, config, line_number_width);
     scope.write_node(root_id, 0, false, &mut out);
     s
 }
@@ -1028,13 +1180,12 @@ mod tests {
     fn array_internal_gaps_yaml() {
         let ctx = mk_gap_ctx();
         let mut s = String::new();
-        let mut outw = crate::serialization::output::Out::new(
-            &mut s,
-            "\n",
-            "  ",
-            false,
+        let cfg = test_render_cfg(
+            crate::OutputTemplate::Yaml,
             crate::serialization::types::Style::Default,
         );
+        let mut outw =
+            crate::serialization::output::Out::new(&mut s, &cfg, None);
         super::templates::render_array(
             crate::OutputTemplate::Yaml,
             &ctx,
@@ -1235,6 +1386,7 @@ mod tests {
             inclusion_flags: &marks,
             render_set_id: render_id,
             config: &cfg,
+            line_number_width: None,
         };
         // Atomic leaves never report omitted counts.
         let none = scope.omitted_for(crate::order::ROOT_PQ_ID, 0);
@@ -1338,17 +1490,34 @@ mod tests {
         needles.iter().for_each(|n| assert!(out.contains(n)));
     }
 
+    fn test_render_cfg(
+        template: crate::OutputTemplate,
+        style: crate::serialization::types::Style,
+    ) -> crate::RenderConfig {
+        crate::RenderConfig {
+            template,
+            indent_unit: "  ".to_string(),
+            space: " ".to_string(),
+            newline: "\n".to_string(),
+            prefer_tail_arrays: false,
+            color_mode: crate::ColorMode::Off,
+            color_enabled: false,
+            style,
+            string_free_prefix_graphemes: None,
+            debug: false,
+        }
+    }
+
     #[test]
     fn array_internal_gaps_pseudo() {
         let ctx = mk_gap_ctx();
         let mut s = String::new();
-        let mut outw = crate::serialization::output::Out::new(
-            &mut s,
-            "\n",
-            "  ",
-            false,
+        let cfg = test_render_cfg(
+            crate::OutputTemplate::Pseudo,
             crate::serialization::types::Style::Default,
         );
+        let mut outw =
+            crate::serialization::output::Out::new(&mut s, &cfg, None);
         super::templates::render_array(
             crate::OutputTemplate::Pseudo,
             &ctx,
@@ -1365,13 +1534,12 @@ mod tests {
     fn array_internal_gaps_js() {
         let ctx = mk_gap_ctx();
         let mut s = String::new();
-        let mut outw = crate::serialization::output::Out::new(
-            &mut s,
-            "\n",
-            "  ",
-            false,
+        let cfg = test_render_cfg(
+            crate::OutputTemplate::Js,
             crate::serialization::types::Style::Default,
         );
+        let mut outw =
+            crate::serialization::output::Out::new(&mut s, &cfg, None);
         super::templates::render_array(
             crate::OutputTemplate::Js,
             &ctx,

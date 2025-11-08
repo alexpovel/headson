@@ -8,22 +8,22 @@ pub struct Out<'a> {
     indent_unit: String,
     color_enabled: bool,
     style: crate::serialization::types::Style,
+    line_number_width: Option<usize>,
 }
 
 impl<'a> Out<'a> {
     pub fn new(
         buf: &'a mut String,
-        newline: &str,
-        indent_unit: &str,
-        color_enabled: bool,
-        style: crate::serialization::types::Style,
+        config: &crate::RenderConfig,
+        line_number_width: Option<usize>,
     ) -> Self {
         Self {
             buf,
-            newline: newline.to_string(),
-            indent_unit: indent_unit.to_string(),
-            color_enabled,
-            style,
+            newline: config.newline.clone(),
+            indent_unit: config.indent_unit.clone(),
+            color_enabled: config.color_enabled,
+            style: config.style,
+            line_number_width,
         }
     }
 
@@ -89,5 +89,9 @@ impl<'a> Out<'a> {
 
     pub fn style(&self) -> crate::serialization::types::Style {
         self.style
+    }
+
+    pub fn line_number_width(&self) -> Option<usize> {
+        self.line_number_width
     }
 }

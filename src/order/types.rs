@@ -1,4 +1,4 @@
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct PriorityConfig {
     pub max_string_graphemes: usize,
     pub array_max_items: usize,
@@ -53,6 +53,7 @@ pub enum ObjectType {
 pub enum ArrayBias {
     Head,
     HeadMidTail,
+    HeadTail,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -145,6 +146,7 @@ pub struct PriorityOrder {
     pub by_priority: Vec<NodeId>, // ids sorted by ascending priority (PQ ids)
     pub total_nodes: usize,
     pub object_type: Vec<ObjectType>,
+    pub force_first_child: Vec<bool>,
 }
 
 pub const ROOT_PQ_ID: usize = 0;

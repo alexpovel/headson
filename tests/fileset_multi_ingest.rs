@@ -66,7 +66,7 @@ environments:
             bytes:
                 b"#!/usr/bin/env bash\nset -euo pipefail\necho \"deploy\"\n"
                     .to_vec(),
-            kind: FilesetInputKind::Text,
+            kind: FilesetInputKind::Text { atomic_lines: true },
         },
     ];
 

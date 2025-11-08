@@ -1,0 +1,9 @@
+---
+source: tests/code_text_fallback_param.rs
+expression: out_default
+---
+ 1: function greet(name: string) {
+ 2:   console.log(`Hello, ${name}`);
+ 3: }
+15: }
+28: main();

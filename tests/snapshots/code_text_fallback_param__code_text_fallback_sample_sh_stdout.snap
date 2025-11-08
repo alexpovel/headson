@@ -1,0 +1,10 @@
+---
+source: tests/code_text_fallback_param.rs
+expression: out_default
+---
+ 1: #!/usr/bin/env bash
+ 8: compute() {
+10:   local total=0
+11:   for ((i=0; i<n; i++)); do
+19: }
+32: main "$@"

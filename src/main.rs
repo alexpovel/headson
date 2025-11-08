@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser, ValueEnum};
 use content_inspector::{ContentType, inspect};
 
@@ -250,41 +250,6 @@ fn compute_priority(
     get_priority_config(per_file_for_priority, cli)
 }
 
-fn any_yaml_ext(entries: &InputEntries) -> bool {
-    entries.iter().any(|(name, _)| {
-        let lower = name.to_ascii_lowercase();
-        lower.ends_with(".yaml") || lower.ends_with(".yml")
-    })
-}
-
-fn all_json_ext(entries: &InputEntries) -> bool {
-    entries
-        .iter()
-        .all(|(name, _)| name.to_ascii_lowercase().ends_with(".json"))
-}
-
-fn choose_input_format_fileset(
-    cli: &Cli,
-    entries: &InputEntries,
-) -> InputFormat {
-    if matches!(cli.format, OutputFormat::Auto) {
-        if any_yaml_ext(entries) {
-            InputFormat::Yaml
-        } else if all_json_ext(entries) {
-            InputFormat::Json
-        } else {
-            // Mixed or unknown extensions: treat as text to avoid JSON/YAML parse errors
-            InputFormat::Text
-        }
-    } else {
-        cli.input_format
-    }
-}
-
-fn should_use_multi_format_fileset(cli: &Cli) -> bool {
-    matches!(cli.format, OutputFormat::Auto)
-}
-
 fn detect_fileset_input_kind(name: &str) -> headson::FilesetInputKind {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".yaml") || lower.ends_with(".yml") {
@@ -292,19 +257,10 @@ fn detect_fileset_input_kind(name: &str) -> headson::FilesetInputKind {
     } else if lower.ends_with(".json") {
         headson::FilesetInputKind::Json
     } else {
-        headson::FilesetInputKind::Text
-    }
-}
-
-fn effective_fileset_template(
-    cli: &Cli,
-    style: headson::Style,
-) -> headson::OutputTemplate {
-    match cli.format {
-        OutputFormat::Auto => headson::OutputTemplate::Auto,
-        OutputFormat::Json => map_json_template_for_style(style),
-        OutputFormat::Yaml => headson::OutputTemplate::Yaml,
-        OutputFormat::Text => headson::OutputTemplate::Text,
+        let atomic = headson::extensions::is_code_like_name(&lower);
+        headson::FilesetInputKind::Text {
+            atomic_lines: atomic,
+        }
     }
 }
 
@@ -370,34 +326,14 @@ fn run_from_paths(
     let eff_lines = compute_effective_lines(cli, input_count);
     let prio = compute_priority(cli, eff, eff_chars, input_count);
     if cli.inputs.len() > 1 {
-        if should_use_multi_format_fileset(cli) {
-            let mut cfg = render_cfg.clone();
-            cfg.template = effective_fileset_template(cli, cfg.style);
-            let budgets = make_budgets(cli, eff, eff_lines, eff_chars);
-            if budgets.byte_budget.is_none()
-                && budgets.char_budget.is_none()
-                && budgets.line_budget.is_some()
-            {
-                cfg.string_free_prefix_graphemes = Some(40);
-            }
-            let files: Vec<headson::FilesetInput> = entries
-                .into_iter()
-                .map(|(name, bytes)| headson::FilesetInput {
-                    kind: detect_fileset_input_kind(&name),
-                    name,
-                    bytes,
-                })
-                .collect();
-            let out = headson::headson_fileset_multi_with_budgets(
-                files, &cfg, &prio, budgets,
-            )?;
-            return Ok((out, ignored));
+        if !matches!(cli.format, OutputFormat::Auto) {
+            bail!(
+                "--format cannot be customized for filesets; remove it or set to auto"
+            );
         }
-
-        let chosen_input = choose_input_format_fileset(cli, &entries);
         let mut cfg = render_cfg.clone();
-        // For filesets: if format=auto, enable per-file template selection.
-        cfg.template = effective_fileset_template(cli, cfg.style);
+        // Filesets always render with per-file auto templates.
+        cfg.template = headson::OutputTemplate::Auto;
         let budgets = make_budgets(cli, eff, eff_lines, eff_chars);
         if budgets.byte_budget.is_none()
             && budgets.char_budget.is_none()
@@ -405,17 +341,16 @@ fn run_from_paths(
         {
             cfg.string_free_prefix_graphemes = Some(40);
         }
-        let out = match chosen_input {
-            InputFormat::Json => headson::headson_many_with_budgets(
-                entries, &cfg, &prio, budgets,
-            )?,
-            InputFormat::Yaml => headson::headson_many_yaml_with_budgets(
-                entries, &cfg, &prio, budgets,
-            )?,
-            InputFormat::Text => headson::headson_many_text_with_budgets(
-                entries, &cfg, &prio, budgets,
-            )?,
-        };
+        let files: Vec<headson::FilesetInput> = entries
+            .into_iter()
+            .map(|(name, bytes)| {
+                let kind = detect_fileset_input_kind(&name);
+                headson::FilesetInput { name, bytes, kind }
+            })
+            .collect();
+        let out = headson::headson_fileset_multi_with_budgets(
+            files, &cfg, &prio, budgets,
+        )?;
         return Ok((out, ignored));
     }
 
@@ -457,7 +392,22 @@ fn run_from_paths(
             headson::headson_yaml_with_budgets(bytes, &cfg, &prio, budgets)?
         }
         InputFormat::Text => {
-            headson::headson_text_with_budgets(bytes, &cfg, &prio, budgets)?
+            let is_code = headson::extensions::is_code_like_name(&lower);
+            if is_code && matches!(cli.format, OutputFormat::Auto) {
+                #[allow(
+                    clippy::redundant_clone,
+                    reason = "code branch requires its own config copy; other paths reuse the original"
+                )]
+                let mut cfg_code = cfg.clone();
+                cfg_code.template = headson::OutputTemplate::Code;
+                headson::headson_text_with_budgets_code(
+                    bytes, &cfg_code, &prio, budgets,
+                )?
+            } else {
+                headson::headson_text_with_budgets(
+                    bytes, &cfg, &prio, budgets,
+                )?
+            }
         }
     };
     Ok((out, ignored))

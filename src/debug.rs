@@ -22,7 +22,6 @@ pub(crate) struct DumpDbg<'a> {
     root: NodeDbg,
     counts: CountsDbg,
     template: &'a str,
-    input_format: &'a str,
     budgets_effective: BudgetsDbg,
     selection: SelectionDbg,
     renderer: RendererDbg<'a>,
@@ -57,7 +56,6 @@ pub(crate) struct RenderDebugArgs<'a> {
     pub render_id: u32,
     pub cfg: &'a crate::RenderConfig,
     pub budgets: crate::Budgets,
-    pub input_format: &'a str,
     pub style: crate::serialization::types::Style,
     pub array_sampler: crate::ArraySamplerStrategy,
     pub top_k: usize,
@@ -135,6 +133,7 @@ fn template_str_for_root(
         T::Js => "js",
         T::Yaml => "yaml",
         T::Text => "text",
+        T::Code => "code",
         T::Auto => match cfg.style {
             crate::serialization::types::Style::Strict => "json",
             crate::serialization::types::Style::Default => "pseudo",
@@ -151,18 +150,29 @@ fn style_str(s: crate::serialization::types::Style) -> &'static str {
     }
 }
 
-fn kind_str(node: &RankedNode, atomic_token: Option<&str>) -> String {
+fn kind_str(
+    node: &RankedNode,
+    atomic_token: Option<&str>,
+    treat_atomic_as_string: bool,
+) -> String {
     match node {
         RankedNode::Array { .. } => "array".into(),
         RankedNode::Object { .. } => "object".into(),
         RankedNode::SplittableLeaf { .. } => "string".into(),
         RankedNode::LeafPart { .. } => "string-part".into(),
-        RankedNode::AtomicLeaf { .. } => match atomic_token {
-            Some("null") => "null".into(),
-            Some("true") | Some("false") => "bool".into(),
-            Some(_) => "number".into(),
-            None => "atomic".into(),
-        },
+        RankedNode::AtomicLeaf { .. } => {
+            if treat_atomic_as_string {
+                // Under text template, atomic tokens represent whole lines; treat as string.
+                "string".into()
+            } else {
+                match atomic_token {
+                    Some("null") => "null".into(),
+                    Some("true") | Some("false") => "bool".into(),
+                    Some(_) => "number".into(),
+                    None => "atomic".into(),
+                }
+            }
+        }
     }
 }
 
@@ -186,19 +196,25 @@ fn string_preview(value: &str) -> String {
     }
 }
 
+struct BuildCtx<'a> {
+    order: &'a PriorityOrder,
+    inclusion_flags: &'a [u32],
+    render_id: u32,
+    include_count: &'a mut usize,
+    omitted_children_sum: &'a mut usize,
+    treat_atomic_as_string: bool,
+}
+
 #[allow(
     clippy::cognitive_complexity,
     clippy::too_many_lines,
     reason = "Pruned tree emission keeps branching in one place for clarity"
 )]
-fn build_node(
-    order: &PriorityOrder,
-    id: usize,
-    inclusion_flags: &[u32],
-    render_id: u32,
-    include_count: &mut usize,
-    omitted_children_sum: &mut usize,
-) -> NodeDbg {
+fn build_node(ctx: &mut BuildCtx<'_>, id: usize) -> NodeDbg {
+    let order = ctx.order;
+    let inclusion_flags = ctx.inclusion_flags;
+    let render_id = ctx.render_id;
+    let treat_atomic_as_string = ctx.treat_atomic_as_string;
     let rn = &order.nodes[id];
     let key_in_object =
         rn.key_in_object().map(std::string::ToString::to_string);
@@ -214,7 +230,7 @@ fn build_node(
     // Count only renderable nodes (skip string parts).
     let renderable = !matches!(rn, RankedNode::LeafPart { .. });
     if renderable {
-        *include_count += 1;
+        *ctx.include_count += 1;
     }
 
     // Leaf handling and children traversal
@@ -264,14 +280,7 @@ fn build_node(
                         .flatten()
                         .unwrap_or(i);
                     idxs.push(orig_index);
-                    kids.push(build_node(
-                        order,
-                        cid_usize,
-                        inclusion_flags,
-                        render_id,
-                        include_count,
-                        omitted_children_sum,
-                    ));
+                    kids.push(build_node(ctx, cid_usize));
                 }
             }
             Built {
@@ -318,14 +327,14 @@ fn build_node(
             }
             let kept_count = kept_indices.len();
             let omitted = total.saturating_sub(kept_count);
-            *omitted_children_sum =
-                omitted_children_sum.saturating_add(omitted);
+            *ctx.omitted_children_sum =
+                ctx.omitted_children_sum.saturating_add(omitted);
         }
     }
 
     NodeDbg {
         id,
-        kind: kind_str(rn, atomic_token_ref),
+        kind: kind_str(rn, atomic_token_ref, treat_atomic_as_string),
         key_in_object,
         index_in_parent_array,
         string_preview: string_preview_opt,
@@ -350,7 +359,6 @@ pub(crate) fn build_render_debug_json(args: RenderDebugArgs) -> String {
         render_id,
         cfg,
         budgets,
-        input_format,
         style,
         array_sampler,
         top_k,
@@ -359,14 +367,24 @@ pub(crate) fn build_render_debug_json(args: RenderDebugArgs) -> String {
     } = args;
     let mut included = 0usize;
     let mut omitted_children_sum: usize = 0;
-    let root = build_node(
+    let root_is_fileset =
+        order.object_type.get(ROOT_PQ_ID) == Some(&ObjectType::Fileset);
+    let treat_atomic_as_string =
+        matches!(
+            cfg.template,
+            crate::serialization::types::OutputTemplate::Text
+                | crate::serialization::types::OutputTemplate::Code
+        ) || (matches!(cfg.template, crate::OutputTemplate::Auto)
+            && root_is_fileset);
+    let mut ctx = BuildCtx {
         order,
-        ROOT_PQ_ID,
         inclusion_flags,
         render_id,
-        &mut included,
-        &mut omitted_children_sum,
-    );
+        include_count: &mut included,
+        omitted_children_sum: &mut omitted_children_sum,
+        treat_atomic_as_string,
+    };
+    let root = build_node(&mut ctx, ROOT_PQ_ID);
     let dump = DumpDbg {
         root,
         counts: CountsDbg {
@@ -375,7 +393,6 @@ pub(crate) fn build_render_debug_json(args: RenderDebugArgs) -> String {
             omitted_children: Some(omitted_children_sum),
         },
         template: template_str_for_root(order, cfg),
-        input_format,
         budgets_effective: BudgetsDbg {
             bytes: budgets.byte_budget,
             chars: budgets.char_budget,

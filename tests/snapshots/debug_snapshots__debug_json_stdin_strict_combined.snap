@@ -1,11 +1,20 @@
 ---
 source: tests/debug_snapshots.rs
-assertion_line: 78
-expression: norm
+assertion_line: 62
+expression: snap
 ---
+STDOUT:
+{
+  "a": 1,
+  "b": {
+    "c": 2
+  }
+}
+
+DEBUG (normalized):
 {
   "budgets_effective": {
-    "bytes": 20000,
+    "bytes": 200,
     "chars": null,
     "lines": null
   },
@@ -14,56 +23,44 @@ expression: norm
     "omitted_children": 0,
     "total_nodes": 0
   },
-  "input_format": "json",
   "output_stats": {
-    "bytes": 49,
+    "bytes": 37,
     "chars": 0,
-    "lines": 8
+    "lines": 6
   },
   "renderer": {
     "array_sampler": "default",
     "prefer_tail_arrays": false,
-    "style": "default",
-    "template": "auto"
+    "style": "strict",
+    "template": "json"
   },
   "root": {
     "children": [
       {
-        "children": [
-          {
-            "atomic_token": "1",
-            "id": 0,
-            "key_in_object": "a",
-            "kind": "number",
-            "metrics": {}
-          }
-        ],
+        "atomic_token": "1",
         "id": 0,
-        "key_in_object": "a.json",
-        "kind": "object",
-        "metrics": {
-          "object_len": 1
-        }
+        "key_in_object": "a",
+        "kind": "number",
+        "metrics": {}
       },
       {
         "children": [
           {
             "atomic_token": "2",
             "id": 0,
-            "key_in_object": "k",
+            "key_in_object": "c",
             "kind": "number",
             "metrics": {}
           }
         ],
         "id": 0,
-        "key_in_object": "b.yaml",
+        "key_in_object": "b",
         "kind": "object",
         "metrics": {
           "object_len": 1
         }
       }
     ],
-    "fileset_root": true,
     "id": 0,
     "kind": "object",
     "metrics": {
@@ -71,7 +68,7 @@ expression: norm
     }
   },
   "selection": {
-    "top_k": 5
+    "top_k": 4
   },
-  "template": "auto"
+  "template": "json"
 }

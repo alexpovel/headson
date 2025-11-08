@@ -31,6 +31,7 @@ pub use order::types::{ArrayBias, ArraySamplerStrategy};
 pub use order::{
     NodeId, NodeKind, PriorityConfig, PriorityOrder, RankedNode, build_order,
 };
+pub use utils::extensions;
 
 pub use serialization::color::resolve_color_enabled;
 pub use serialization::types::{
@@ -133,7 +134,13 @@ pub fn headson_text(
     priority_cfg: &PriorityConfig,
     budget: usize,
 ) -> Result<String> {
-    let arena = crate::ingest::parse_text_one(input, priority_cfg)?;
+    let atomic = matches!(config.template, OutputTemplate::Code);
+    let arena =
+        crate::ingest::formats::text::build_text_tree_arena_from_bytes_with_mode(
+            input,
+            priority_cfg,
+            atomic,
+        )?;
     let order_build = order::build_order(&arena, priority_cfg)?;
     let out = find_largest_render_under_budgets(
         &order_build,
@@ -255,7 +262,6 @@ fn find_largest_render_under_budgets(
             chars: stats.chars,
             lines: stats.lines,
         };
-        let input_format = "json"; // format-agnostic fallback for debug metadata
         let array_sampler = crate::ArraySamplerStrategy::Default;
         let dbg = crate::debug::build_render_debug_json(
             crate::debug::RenderDebugArgs {
@@ -264,7 +270,6 @@ fn find_largest_render_under_budgets(
                 render_id: render_set_id,
                 cfg: config,
                 budgets,
-                input_format,
                 style: config.style,
                 array_sampler,
                 top_k: k,
@@ -359,7 +364,35 @@ pub fn headson_text_with_budgets(
     priority_cfg: &PriorityConfig,
     budgets: Budgets,
 ) -> Result<String> {
-    let arena = crate::ingest::parse_text_one(input, priority_cfg)?;
+    let atomic = matches!(config.template, OutputTemplate::Code);
+    let arena =
+        crate::ingest::formats::text::build_text_tree_arena_from_bytes_with_mode(
+            input,
+            priority_cfg,
+            atomic,
+        )?;
+    let order_build = order::build_order(&arena, priority_cfg)?;
+    Ok(find_largest_render_under_budgets(
+        &order_build,
+        config,
+        budgets,
+    ))
+}
+
+/// Text ingest where each line is treated as an atomic string (non-truncatable).
+/// Useful for source-like files to avoid mid-line ellipses; omissions happen at line level.
+pub fn headson_text_with_budgets_code(
+    input: Vec<u8>,
+    config: &RenderConfig,
+    priority_cfg: &PriorityConfig,
+    budgets: Budgets,
+) -> Result<String> {
+    let arena =
+        crate::ingest::formats::text::build_text_tree_arena_from_bytes_with_mode(
+            input,
+            priority_cfg,
+            true,
+        )?;
     let order_build = order::build_order(&arena, priority_cfg)?;
     Ok(find_largest_render_under_budgets(
         &order_build,
