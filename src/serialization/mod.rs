@@ -1,7 +1,10 @@
 use crate::order::ObjectType;
-use crate::order::{NodeKind, PriorityOrder, ROOT_PQ_ID, RankedNode};
+use crate::order::{NodeId, NodeKind, PriorityOrder, ROOT_PQ_ID, RankedNode};
+use std::collections::HashMap;
+use std::sync::Arc;
 pub mod color;
 mod fileset;
+mod highlight;
 pub mod output;
 pub mod templates;
 pub mod types;
@@ -24,6 +27,7 @@ pub(crate) struct RenderScope<'a> {
     config: &'a crate::RenderConfig,
     // Optional global width for line number alignment when enabled.
     line_number_width: Option<usize>,
+    code_highlight_cache: HashMap<usize, Arc<Vec<String>>>,
 }
 
 impl<'a> RenderScope<'a> {
@@ -63,6 +67,119 @@ impl<'a> RenderScope<'a> {
             }
         }
         any
+    }
+
+    fn source_hint_for(&self, id: usize) -> Option<&'a str> {
+        let mut cursor = Some(NodeId(id));
+        while let Some(node) = cursor {
+            if let Some(key) = self.order.nodes[node.0].key_in_object() {
+                return Some(key);
+            }
+            cursor = self.order.parent.get(node.0).and_then(|parent| *parent);
+        }
+        self.config.primary_source_name.as_deref()
+    }
+    fn code_root_array_id(&self, array_id: usize) -> usize {
+        let mut current = array_id;
+        while let Some(Some(parent)) = self.order.parent.get(current) {
+            match self.order.nodes[parent.0] {
+                RankedNode::Array { .. } => current = parent.0,
+                _ => break,
+            }
+        }
+        current
+    }
+
+    fn push_code_line(
+        &self,
+        child_idx: usize,
+        text: &str,
+        acc: &mut Vec<Option<String>>,
+    ) {
+        let idx = self
+            .order
+            .index_in_parent_array
+            .get(child_idx)
+            .and_then(|o| *o)
+            .unwrap_or(0);
+        if acc.len() <= idx {
+            acc.resize(idx + 1, None);
+        }
+        acc[idx] = Some(text.to_string());
+    }
+
+    fn collect_code_lines(
+        &self,
+        array_id: usize,
+        acc: &mut Vec<Option<String>>,
+    ) {
+        if let Some(children) = self.order.children.get(array_id) {
+            for child in children {
+                let child_idx = child.0;
+                match &self.order.nodes[child_idx] {
+                    RankedNode::Array { .. } | RankedNode::Object { .. } => {
+                        self.collect_code_lines(child_idx, acc);
+                    }
+                    RankedNode::SplittableLeaf { value, .. } => {
+                        self.push_code_line(child_idx, value, acc);
+                    }
+                    RankedNode::AtomicLeaf { token, .. } => {
+                        self.push_code_line(child_idx, token, acc);
+                    }
+                    RankedNode::LeafPart { .. } => {}
+                }
+            }
+        }
+    }
+
+    fn compute_code_highlights(&self, array_id: usize) -> Vec<String> {
+        let root = self.code_root_array_id(array_id);
+        if let Some(full) = self.order.code_lines.get(&root) {
+            let mut highlighter =
+                crate::serialization::highlight::CodeHighlighter::new(
+                    self.source_hint_for(root),
+                );
+            return full
+                .iter()
+                .map(|line| highlighter.highlight_line(line))
+                .collect();
+        }
+        let mut lines: Vec<Option<String>> = Vec::new();
+        self.collect_code_lines(array_id, &mut lines);
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        let mut highlighter =
+            crate::serialization::highlight::CodeHighlighter::new(
+                self.source_hint_for(array_id),
+            );
+        lines
+            .into_iter()
+            .map(|opt| {
+                let text = opt.unwrap_or_default();
+                highlighter.highlight_line(&text)
+            })
+            .collect()
+    }
+
+    fn code_highlights_for(
+        &mut self,
+        array_id: usize,
+        template: crate::OutputTemplate,
+    ) -> Option<Arc<Vec<String>>> {
+        if !self.config.color_enabled {
+            return None;
+        }
+        if !matches!(template, crate::OutputTemplate::Code) {
+            return None;
+        }
+        let root = self.code_root_array_id(array_id);
+        if let Some(existing) = self.code_highlight_cache.get(&root) {
+            return Some(existing.clone());
+        }
+        let computed = Arc::new(self.compute_code_highlights(root));
+        self.code_highlight_cache.insert(root, computed.clone());
+        Some(computed)
     }
     fn push_array_child_line(
         &self,
@@ -145,6 +262,8 @@ impl<'a> RenderScope<'a> {
             depth,
             inline_open: inline,
             omitted_at_start: config.prefer_tail_arrays,
+            source_hint: self.source_hint_for(id),
+            code_highlight: self.code_highlights_for(id, config.template),
         };
         render_array(config.template, &ctx, out)
     }
@@ -544,6 +663,8 @@ impl<'a> RenderScope<'a> {
             depth,
             inline_open: inline,
             omitted_at_start: config.prefer_tail_arrays,
+            source_hint: self.source_hint_for(id),
+            code_highlight: self.code_highlights_for(id, template),
         };
         render_array(template, &ctx, out)
     }
@@ -747,6 +868,7 @@ pub fn render_from_render_set(
         render_set_id: render_id,
         config,
         line_number_width,
+        code_highlight_cache: HashMap::new(),
     };
     let mut s = String::new();
     let mut out = Out::new(&mut s, config, line_number_width);
@@ -813,6 +935,7 @@ mod tests {
                 style: crate::serialization::types::Style::Strict,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_snapshot!("arena_render_empty", out);
@@ -850,6 +973,7 @@ mod tests {
                 style: crate::serialization::types::Style::Strict,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         // Sanity: output should contain CRLF newlines and render the object child across lines.
@@ -889,6 +1013,7 @@ mod tests {
                 style: crate::serialization::types::Style::Strict,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_snapshot!("arena_render_single", out);
@@ -929,6 +1054,7 @@ mod tests {
                 style: crate::serialization::types::Style::Default,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_snapshot!("array_omitted_pseudo_head", out_head);
@@ -950,6 +1076,7 @@ mod tests {
                 style: crate::serialization::types::Style::Default,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_snapshot!("array_omitted_pseudo_tail", out_tail);
@@ -988,6 +1115,7 @@ mod tests {
                 style: crate::serialization::types::Style::Detailed,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_snapshot!("array_omitted_js_head", out_head);
@@ -1008,6 +1136,7 @@ mod tests {
                 style: crate::serialization::types::Style::Detailed,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_snapshot!("array_omitted_js_tail", out_tail);
@@ -1046,6 +1175,7 @@ mod tests {
                 style: crate::serialization::types::Style::Detailed,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_yaml_valid(&out_head);
@@ -1067,6 +1197,7 @@ mod tests {
                 style: crate::serialization::types::Style::Detailed,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_yaml_valid(&out_tail);
@@ -1102,6 +1233,7 @@ mod tests {
                 style: crate::serialization::types::Style::Default,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_yaml_valid(&out);
@@ -1137,6 +1269,7 @@ mod tests {
                 style: crate::serialization::types::Style::Default,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_yaml_valid(&out);
@@ -1170,6 +1303,7 @@ mod tests {
                 style: crate::serialization::types::Style::Detailed,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_yaml_valid(&out);
@@ -1231,6 +1365,7 @@ mod tests {
                 style: crate::serialization::types::Style::Default,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_yaml_valid(&out);
@@ -1303,6 +1438,7 @@ mod tests {
                 style: crate::serialization::types::Style::Strict,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         // Expect the first 5 characters plus an ellipsis, as a valid JSON string literal.
@@ -1338,6 +1474,7 @@ mod tests {
                 style: crate::serialization::types::Style::Default,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_yaml_valid(&out);
@@ -1380,6 +1517,7 @@ mod tests {
             style: crate::serialization::types::Style::Strict,
             string_free_prefix_graphemes: None,
             debug: false,
+            primary_source_name: None,
         };
         let scope = RenderScope {
             order: &build,
@@ -1387,6 +1525,7 @@ mod tests {
             render_set_id: render_id,
             config: &cfg,
             line_number_width: None,
+            code_highlight_cache: HashMap::new(),
         };
         // Atomic leaves never report omitted counts.
         let none = scope.omitted_for(crate::order::ROOT_PQ_ID, 0);
@@ -1420,6 +1559,7 @@ mod tests {
                 style: crate::serialization::types::Style::Strict,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         assert_snapshot!("inline_open_array_in_object_json", out);
@@ -1456,6 +1596,7 @@ mod tests {
                 style: crate::serialization::types::Style::Detailed,
                 string_free_prefix_graphemes: None,
                 debug: false,
+                primary_source_name: None,
             },
         );
         // Should be a valid JS object with one property and an omitted summary.
@@ -1471,7 +1612,7 @@ mod tests {
         );
     }
 
-    fn mk_gap_ctx() -> super::templates::ArrayCtx {
+    fn mk_gap_ctx() -> super::templates::ArrayCtx<'static> {
         super::templates::ArrayCtx {
             children: vec![
                 (0, (crate::order::NodeKind::Number, "1".to_string())),
@@ -1483,6 +1624,8 @@ mod tests {
             depth: 0,
             inline_open: false,
             omitted_at_start: false,
+            source_hint: None,
+            code_highlight: None,
         }
     }
 
@@ -1505,6 +1648,7 @@ mod tests {
             style,
             string_free_prefix_graphemes: None,
             debug: false,
+            primary_source_name: None,
         }
     }
 
