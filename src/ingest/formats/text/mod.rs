@@ -19,6 +19,8 @@ fn normalize_newlines(s: &str) -> Cow<'_, str> {
     }
 }
 
+const ARRAY_NO_SAMPLING_THRESHOLD: usize = 20_000;
+
 struct TextArenaBuilder {
     arena: JsonTreeArena,
     array_cap: usize,
@@ -105,6 +107,20 @@ impl TextArenaBuilder {
         bias_override: Option<ArrayBias>,
     ) -> usize {
         let id = self.push_default();
+        if total <= ARRAY_NO_SAMPLING_THRESHOLD {
+            let children_start = self.arena.children.len();
+            self.arena.children.extend_from_slice(all_children);
+            let n = &mut self.arena.nodes[id];
+            n.kind = NodeKind::Array;
+            n.children_start = children_start;
+            n.children_len = total;
+            n.array_len = Some(total);
+            n.array_bias_override = bias_override;
+            n.force_first_line = false;
+            n.arr_indices_start = 0;
+            n.arr_indices_len = 0;
+            return id;
+        }
         let idxs = choose_indices(self.sampler, total, self.array_cap);
         let kept = idxs.len().min(self.array_cap);
         let children_start = self.arena.children.len();
@@ -135,6 +151,40 @@ impl TextArenaBuilder {
         total: usize,
     ) -> usize {
         let id = self.push_default();
+        if total <= ARRAY_NO_SAMPLING_THRESHOLD {
+            self.push_full_line_array(id, lines, total);
+            return id;
+        }
+        self.push_sampled_line_array(id, lines, total);
+        id
+    }
+
+    fn push_full_line_array(
+        &mut self,
+        id: usize,
+        lines: &[String],
+        total: usize,
+    ) {
+        let children_start = self.arena.children.len();
+        for line in lines {
+            let child = self.push_string(line.clone(), false);
+            self.arena.children.push(child);
+        }
+        let n = &mut self.arena.nodes[id];
+        n.kind = NodeKind::Array;
+        n.children_start = children_start;
+        n.children_len = total;
+        n.array_len = Some(total);
+        n.arr_indices_start = 0;
+        n.arr_indices_len = 0;
+    }
+
+    fn push_sampled_line_array(
+        &mut self,
+        id: usize,
+        lines: &[String],
+        total: usize,
+    ) {
         let idxs = choose_indices(self.sampler, total, self.array_cap);
         let kept = idxs.len().min(self.array_cap);
         let children_start = self.arena.children.len();
@@ -165,7 +215,6 @@ impl TextArenaBuilder {
             n.arr_indices_start = start;
             n.arr_indices_len = len.min(pushed);
         }
-        id
     }
 }
 
@@ -476,6 +525,7 @@ pub fn parse_text_many(
 
 #[cfg(test)]
 mod tests {
+    use super::ARRAY_NO_SAMPLING_THRESHOLD;
     use crate::{
         PriorityConfig, RenderConfig, headson_text,
         serialization::types::{OutputTemplate, Style},
@@ -523,8 +573,9 @@ mod tests {
 
     #[test]
     fn tail_sampler_keeps_last_n_indices_text() {
-        // Build 10 lines; with array_max_items=5 and tail sampler we should keep last 5
-        let lines = (0..10)
+        // Build more lines than the sampling threshold so tail sampler is exercised.
+        let total = ARRAY_NO_SAMPLING_THRESHOLD + 10;
+        let lines = (0..total)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join("\n");
@@ -544,6 +595,10 @@ mod tests {
             };
             orig_indices.push(oi);
         }
-        assert_eq!(orig_indices, vec![5, 6, 7, 8, 9]);
+        assert_eq!(
+            orig_indices,
+            ((total - 5)..total).collect::<Vec<_>>(),
+            "tail sampler should keep last 5 indices"
+        );
     }
 }
