@@ -2,6 +2,7 @@
     clippy::multiple_crate_versions,
     reason = "Dependency graph pulls distinct versions (e.g., yaml-rust2)."
 )]
+mod sorting;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser, ValueEnum};
 use content_inspector::{ContentType, inspect};
+use sorting::sort_paths_for_fileset;
 
 type InputEntry = (String, Vec<u8>);
 type InputEntries = Vec<InputEntry>;
@@ -70,6 +72,12 @@ struct Cli {
         help = "Suppress fileset section headers in the output"
     )]
     no_header: bool,
+    #[arg(
+        long = "no-sort",
+        default_value_t = false,
+        help = "Keep input order for filesets (skip frecency/mtime sorting)."
+    )]
+    no_sort: bool,
     #[arg(
         short = 'm',
         long = "compact",
@@ -324,7 +332,21 @@ fn run_from_paths(
     cli: &Cli,
     render_cfg: &headson::RenderConfig,
 ) -> Result<(String, IgnoreNotices)> {
-    let (entries, ignored) = ingest_paths(&cli.inputs)?;
+    let sorted_inputs = if cli.inputs.len() > 1 && !cli.no_sort {
+        sort_paths_for_fileset(&cli.inputs)
+    } else {
+        cli.inputs.clone()
+    };
+    if std::env::var_os("HEADSON_FRECEN_TRACE").is_some() {
+        eprintln!("run_from_paths sorted_inputs={sorted_inputs:?}");
+    }
+    let (entries, ignored) = ingest_paths(&sorted_inputs)?;
+    if std::env::var_os("HEADSON_FRECEN_TRACE").is_some() {
+        eprintln!(
+            "run_from_paths ingested={:?}",
+            entries.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+    }
     let included = entries.len();
     let input_count = included.max(1);
     let eff = compute_effective_bytes(cli, input_count);
@@ -614,5 +636,122 @@ fn resolve_effective_template_for_single(
                 headson::OutputTemplate::Text
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sorting::{FrecencyContext, sort_paths_with_context};
+    use filetime::{FileTime, set_file_mtime};
+    use git2::{Repository, Signature, Time};
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    fn rel_to_workdir(path: &std::path::Path, repo: &Repository) -> PathBuf {
+        let workdir = repo.workdir().expect("workdir");
+        let workdir_canon = workdir
+            .canonicalize()
+            .unwrap_or_else(|_| workdir.to_path_buf());
+        let path_canon =
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        path.strip_prefix(workdir)
+            .or_else(|_| path_canon.strip_prefix(&workdir_canon))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                path.file_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| path.to_path_buf())
+            })
+    }
+
+    fn commit_single_file(repo: &Repository, path: &std::path::Path) {
+        let mut idx = repo.index().expect("index");
+        let rel = rel_to_workdir(path, repo);
+        idx.add_path(rel.as_path()).expect("add path");
+        idx.write().expect("write index");
+        let tree_id = idx.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("tree");
+        let sig = Signature::new(
+            "tester",
+            "tester@example.com",
+            &Time::new(1_700_000_000, 0),
+        )
+        .expect("sig");
+        let parent = repo
+            .head()
+            .ok()
+            .and_then(|h| h.target())
+            .and_then(|oid| repo.find_commit(oid).ok());
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &parents)
+            .expect("commit");
+    }
+
+    #[test]
+    fn sorts_by_mtime_when_no_frecency() {
+        let temp = tempdir().expect("tempdir");
+        let first = temp.path().join("first.txt");
+        fs::write(&first, b"first").expect("write first");
+        set_file_mtime(&first, FileTime::from_unix_time(1, 0))
+            .expect("mtime first");
+        let second = temp.path().join("second.txt");
+        fs::write(&second, b"second").expect("write second");
+        set_file_mtime(&second, FileTime::from_unix_time(2, 0))
+            .expect("mtime second");
+
+        let paths = vec![first.clone(), second.clone()];
+        let sorted = sort_paths_with_context(&paths, temp.path(), None);
+        assert_eq!(sorted, vec![second, first]);
+    }
+
+    #[test]
+    fn prefers_frecency_rank_over_mtime() {
+        let temp = tempdir().expect("tempdir");
+        let newer = temp.path().join("newer.txt");
+        let older = temp.path().join("older.txt");
+        fs::write(&older, b"older").expect("write older");
+        set_file_mtime(&older, FileTime::from_unix_time(5, 0))
+            .expect("mtime older");
+        fs::write(&newer, b"newer").expect("write newer");
+        set_file_mtime(&newer, FileTime::from_unix_time(10, 0))
+            .expect("mtime newer");
+
+        let mut ctx = FrecencyContext {
+            repo_root: temp
+                .path()
+                .canonicalize()
+                .unwrap_or_else(|_| temp.path().to_path_buf()),
+            ranks: HashMap::new(),
+        };
+        ctx.ranks.insert(OsString::from("older.txt"), 0);
+        ctx.ranks.insert(OsString::from("newer.txt"), 1);
+
+        let paths = vec![newer.clone(), older.clone()];
+        let sorted = sort_paths_with_context(&paths, temp.path(), Some(&ctx));
+        assert_eq!(sorted, vec![older, newer]);
+    }
+
+    #[test]
+    fn frecency_context_builds_for_git_repo() {
+        let dir = tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init repo");
+        let file = dir.path().join("one.txt");
+        fs::write(&file, b"hi").expect("write");
+        commit_single_file(&repo, &file);
+
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", dir.path().join("cache"));
+        }
+        let ctx = sorting::build_frecency_context(dir.path());
+        assert!(
+            ctx.as_ref()
+                .and_then(|c| c.rank_for(std::path::Path::new("one.txt")))
+                .is_some(),
+            "frecency context should rank committed files"
+        );
     }
 }
