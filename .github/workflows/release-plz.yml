@@ -19,13 +19,13 @@ jobs:
     steps:
       - &checkout
         name: Checkout repository
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
           persist-credentials: false
       - &install-rust
         name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@0b1efabc08b657293548b77fb76cc02d26091c7e # stable
+        uses: dtolnay/rust-toolchain@0f44b27771c32bda9f458f75a1e241b09791b331 # stable
         with:
           toolchain: stable
       - id: release
@@ -49,11 +49,11 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout repository
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@0b1efabc08b657293548b77fb76cc02d26091c7e # stable
+        uses: dtolnay/rust-toolchain@0f44b27771c32bda9f458f75a1e241b09791b331 # stable
         with:
           toolchain: stable
       - name: Run release-plz
@@ -68,12 +68,13 @@ jobs:
         id: pr_branch
         run: |
           set -euo pipefail
-          branch="${{ steps.release_pr.outputs.release_pr_branch || '' }}"
+          git fetch origin 'release-plz-*' --depth=1 || true
+          branch=$(git ls-remote --heads origin 'release-plz-*' | awk '{print $2}' | sed 's@refs/heads/@@' | sort | tail -n1)
           echo "name=${branch}" >> "$GITHUB_OUTPUT"
           if [ -z "${branch}" ]; then
-            echo "No release PR branch produced (nothing to release).";
+            echo "No release-plz branch found after release-pr; skipping lockfile sync."
           else
-            echo "Release PR branch: ${branch}";
+            echo "Release PR branch: ${branch}"
           fi
       - name: Checkout release-pr branch
         if: steps.pr_branch.outputs.name != ''
@@ -119,7 +120,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Sync Python versions from Cargo.toml
         shell: bash
@@ -155,7 +156,7 @@ jobs:
             exit 1
           fi
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@0b1efabc08b657293548b77fb76cc02d26091c7e # stable
+        uses: dtolnay/rust-toolchain@0f44b27771c32bda9f458f75a1e241b09791b331 # stable
         with:
           toolchain: stable
       - name: Update Python lockfile
