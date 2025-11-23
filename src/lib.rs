@@ -45,136 +45,6 @@ pub struct Budgets {
     pub line_budget: Option<usize>,
 }
 
-pub fn headson(
-    input: Vec<u8>,
-    config: &RenderConfig,
-    priority_cfg: &PriorityConfig,
-    budget: usize,
-) -> Result<String> {
-    let arena = crate::ingest::parse_json_one(input, priority_cfg)?;
-    let order_build = order::build_order(&arena, priority_cfg)?;
-    let out = find_largest_render_under_budgets(
-        &order_build,
-        config,
-        Budgets {
-            byte_budget: Some(budget),
-            char_budget: None,
-            line_budget: None,
-        },
-    );
-    Ok(out)
-}
-
-pub fn headson_many(
-    inputs: Vec<(String, Vec<u8>)>,
-    config: &RenderConfig,
-    priority_cfg: &PriorityConfig,
-    budget: usize,
-) -> Result<String> {
-    let arena = crate::ingest::parse_json_many(inputs, priority_cfg)?;
-    let order_build = order::build_order(&arena, priority_cfg)?;
-    let out = find_largest_render_under_budgets(
-        &order_build,
-        config,
-        Budgets {
-            byte_budget: Some(budget),
-            char_budget: None,
-            line_budget: None,
-        },
-    );
-    Ok(out)
-}
-
-/// Same as `headson` but using the YAML ingest path.
-pub fn headson_yaml(
-    input: Vec<u8>,
-    config: &RenderConfig,
-    priority_cfg: &PriorityConfig,
-    budget: usize,
-) -> Result<String> {
-    let arena = crate::ingest::parse_yaml_one(input, priority_cfg)?;
-    let order_build = order::build_order(&arena, priority_cfg)?;
-    let out = find_largest_render_under_budgets(
-        &order_build,
-        config,
-        Budgets {
-            byte_budget: Some(budget),
-            char_budget: None,
-            line_budget: None,
-        },
-    );
-    Ok(out)
-}
-
-/// Same as `headson_many` but using the YAML ingest path.
-pub fn headson_many_yaml(
-    inputs: Vec<(String, Vec<u8>)>,
-    config: &RenderConfig,
-    priority_cfg: &PriorityConfig,
-    budget: usize,
-) -> Result<String> {
-    let arena = crate::ingest::parse_yaml_many(inputs, priority_cfg)?;
-    let order_build = order::build_order(&arena, priority_cfg)?;
-    let out = find_largest_render_under_budgets(
-        &order_build,
-        config,
-        Budgets {
-            byte_budget: Some(budget),
-            char_budget: None,
-            line_budget: None,
-        },
-    );
-    Ok(out)
-}
-
-/// Same as `headson` but using the Text ingest path.
-pub fn headson_text(
-    input: Vec<u8>,
-    config: &RenderConfig,
-    priority_cfg: &PriorityConfig,
-    budget: usize,
-) -> Result<String> {
-    let atomic = matches!(config.template, OutputTemplate::Code);
-    let arena =
-        crate::ingest::formats::text::build_text_tree_arena_from_bytes_with_mode(
-            input,
-            priority_cfg,
-            atomic,
-        )?;
-    let order_build = order::build_order(&arena, priority_cfg)?;
-    let out = find_largest_render_under_budgets(
-        &order_build,
-        config,
-        Budgets {
-            byte_budget: Some(budget),
-            char_budget: None,
-            line_budget: None,
-        },
-    );
-    Ok(out)
-}
-
-/// Same as `headson_many` but using the Text ingest path.
-pub fn headson_many_text(
-    inputs: Vec<(String, Vec<u8>)>,
-    config: &RenderConfig,
-    priority_cfg: &PriorityConfig,
-    budget: usize,
-) -> Result<String> {
-    let arena = crate::ingest::parse_text_many(inputs, priority_cfg)?;
-    let order_build = order::build_order(&arena, priority_cfg)?;
-    let out = find_largest_render_under_budgets(
-        &order_build,
-        config,
-        Budgets {
-            byte_budget: Some(budget),
-            char_budget: None,
-            line_budget: None,
-        },
-    );
-    Ok(out)
-}
-
 /// New generalized budgeting: enforce optional char and/or line caps.
 fn find_largest_render_under_budgets(
     order_build: &PriorityOrder,
@@ -313,7 +183,7 @@ fn select_best_k(
 // (removed) render_final helper was inlined to centralize optional debug dump
 
 // Optional new public API that accepts both budgets explicitly.
-pub fn headson_with_budgets(
+pub fn headson(
     input: Vec<u8>,
     config: &RenderConfig,
     priority_cfg: &PriorityConfig,
@@ -328,7 +198,7 @@ pub fn headson_with_budgets(
     ))
 }
 
-pub fn headson_many_with_budgets(
+pub fn headson_many(
     inputs: Vec<(String, Vec<u8>)>,
     config: &RenderConfig,
     priority_cfg: &PriorityConfig,
@@ -343,7 +213,7 @@ pub fn headson_many_with_budgets(
     ))
 }
 
-pub fn headson_yaml_with_budgets(
+pub fn headson_yaml(
     input: Vec<u8>,
     config: &RenderConfig,
     priority_cfg: &PriorityConfig,
@@ -358,7 +228,7 @@ pub fn headson_yaml_with_budgets(
     ))
 }
 
-pub fn headson_many_yaml_with_budgets(
+pub fn headson_many_yaml(
     inputs: Vec<(String, Vec<u8>)>,
     config: &RenderConfig,
     priority_cfg: &PriorityConfig,
@@ -373,7 +243,7 @@ pub fn headson_many_yaml_with_budgets(
     ))
 }
 
-pub fn headson_text_with_budgets(
+pub fn headson_text(
     input: Vec<u8>,
     config: &RenderConfig,
     priority_cfg: &PriorityConfig,
@@ -396,7 +266,7 @@ pub fn headson_text_with_budgets(
 
 /// Text ingest where each line is treated as an atomic string (non-truncatable).
 /// Useful for source-like files to avoid mid-line ellipses; omissions happen at line level.
-pub fn headson_text_with_budgets_code(
+pub fn headson_text_code(
     input: Vec<u8>,
     config: &RenderConfig,
     priority_cfg: &PriorityConfig,
@@ -416,7 +286,7 @@ pub fn headson_text_with_budgets_code(
     ))
 }
 
-pub fn headson_many_text_with_budgets(
+pub fn headson_many_text(
     inputs: Vec<(String, Vec<u8>)>,
     config: &RenderConfig,
     priority_cfg: &PriorityConfig,
@@ -432,7 +302,7 @@ pub fn headson_many_text_with_budgets(
 }
 
 /// Fileset helper that ingests each input according to its detected format.
-pub fn headson_fileset_multi_with_budgets(
+pub fn headson_fileset_multi(
     inputs: Vec<crate::ingest::fileset::FilesetInput>,
     config: &RenderConfig,
     priority_cfg: &PriorityConfig,

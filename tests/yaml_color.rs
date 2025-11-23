@@ -50,10 +50,15 @@ fn yaml_coloring_applies_and_strips_to_plain() {
     let prio = PriorityConfig::new(usize::MAX, usize::MAX);
 
     let budget = 10_000usize;
+    let budgets = headson::Budgets {
+        byte_budget: Some(budget),
+        char_budget: None,
+        line_budget: None,
+    };
     let plain =
-        headson::headson_yaml(input.clone(), &cfg_plain, &prio, budget)
+        headson::headson_yaml(input.clone(), &cfg_plain, &prio, budgets)
             .expect("plain yaml");
-    let colored = headson::headson_yaml(input, &cfg_color, &prio, budget)
+    let colored = headson::headson_yaml(input, &cfg_color, &prio, budgets)
         .expect("colored yaml");
 
     // Contains ANSI SGR and specific roles (blue for keys, green for strings).
