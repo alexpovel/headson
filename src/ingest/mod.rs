@@ -25,8 +25,8 @@ pub mod sampling;
     reason = "Re-exported helpers need to stay public even when unused internally"
 )]
 pub use formats::{
-    parse_json_many, parse_json_one, parse_text_many, parse_text_one,
-    parse_text_one_with_mode, parse_yaml_many, parse_yaml_one,
+    parse_json_one, parse_text_many, parse_text_one, parse_text_one_with_mode,
+    parse_yaml_one,
 };
 
 /// Dispatch the appropriate ingest path for any supported input kind.
@@ -36,9 +36,7 @@ pub fn ingest_into_arena(
 ) -> Result<TreeArena> {
     match input {
         InputKind::Json(bytes) => parse_json_one(bytes, priority_cfg),
-        InputKind::JsonMany(inputs) => parse_json_many(inputs, priority_cfg),
         InputKind::Yaml(bytes) => parse_yaml_one(bytes, priority_cfg),
-        InputKind::YamlMany(inputs) => parse_yaml_many(inputs, priority_cfg),
         InputKind::Text { bytes, atomic } => {
             parse_text_one_with_mode(bytes, priority_cfg, atomic)
         }
@@ -78,7 +76,7 @@ mod tests {
             ("a.json".to_string(), b"{}".to_vec()),
             ("b.json".to_string(), b"[]".to_vec()),
         ];
-        let arena = parse_json_many(
+        let arena = formats::json::JsonIngest::parse_many(
             inputs,
             &PriorityConfig::new(usize::MAX, usize::MAX),
         )

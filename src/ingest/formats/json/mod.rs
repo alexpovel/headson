@@ -85,13 +85,6 @@ pub fn parse_json_one(
     JsonIngest::parse_one(bytes, cfg)
 }
 
-pub fn parse_json_many(
-    inputs: Vec<(String, Vec<u8>)>,
-    cfg: &PriorityConfig,
-) -> Result<TreeArena> {
-    JsonIngest::parse_many(inputs, cfg)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
