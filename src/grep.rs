@@ -84,6 +84,7 @@ pub(crate) fn reorder_priority_with_must_keep(
             seen[idx] = true;
         }
     }
+
     for &id in order.by_priority.iter() {
         let idx = id.0;
         if !seen[idx] {

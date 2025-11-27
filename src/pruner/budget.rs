@@ -11,6 +11,10 @@ pub struct Budgets {
     pub line_budget: Option<usize>,
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Top-level orchestrator; splitting would obscure the budget/search flow"
+)]
 pub fn find_largest_render_under_budgets(
     order_build: &mut PriorityOrder,
     config: &RenderConfig,
@@ -33,7 +37,6 @@ pub fn find_largest_render_under_budgets(
     );
     let min_k = min_k_for(&grep_state, grep);
     let must_keep_slice = must_keep_slice(&grep_state, grep);
-
     let (k, mut inclusion_flags, render_set_id) = select_best_k(
         order_build,
         &measure_cfg,
@@ -74,7 +77,13 @@ pub fn find_largest_render_under_budgets(
         order_build,
         &inclusion_flags,
         render_set_id,
-        config,
+        &crate::RenderConfig {
+            grep_highlight: config
+                .grep_highlight
+                .clone()
+                .or_else(|| grep.regex.clone()),
+            ..config.clone()
+        },
     )
 }
 

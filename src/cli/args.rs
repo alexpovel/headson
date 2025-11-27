@@ -186,6 +186,10 @@ pub enum InputFormat {
     Text,
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Single place assembling RenderConfig; further splitting would reduce clarity"
+)]
 pub fn get_render_config_from(cli: &Cli) -> headson::RenderConfig {
     fn color_mode_from_flags(cli: &Cli) -> headson::ColorMode {
         if cli.color {
@@ -235,6 +239,7 @@ pub fn get_render_config_from(cli: &Cli) -> headson::RenderConfig {
         primary_source_name: None,
         show_fileset_headers: !cli.no_header,
         count_fileset_headers_in_budgets: cli.count_headers,
+        grep_highlight: None,
     }
 }
 
