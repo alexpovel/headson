@@ -2,6 +2,7 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use headson::{
     Budgets, GrepConfig, InputKind, PriorityConfig, RenderConfig, Style,
 };
+use tempfile::tempdir;
 
 // Covers strong --grep behavior (guaranteed inclusion path). Weak mode
 // assertions belong in separate tests when implemented.
@@ -344,6 +345,212 @@ fn grep_highlight_is_applied_once_per_value() {
     assert!(
         !stdout.contains("\u{001b}[31m\u{001b}[31mfoo"),
         "matches should be highlighted once, without nested escapes; got: {stdout:?}"
+    );
+}
+
+#[test]
+fn grep_filters_out_files_without_matches_in_filesets() {
+    let dir = tempdir().unwrap();
+    let with = dir.path().join("with.json");
+    let without = dir.path().join("without.json");
+    std::fs::write(&with, br#"{"keep":"needle"}"#).unwrap();
+    std::fs::write(&without, br#"{"drop":0}"#).unwrap();
+
+    let assert = cargo_bin_cmd!("hson")
+        .current_dir(dir.path())
+        .args([
+            "--no-color",
+            "--grep",
+            "needle",
+            "--no-sort",
+            with.file_name().unwrap().to_str().unwrap(),
+            without.file_name().unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("needle"));
+    assert!(
+        !stdout.contains("without.json"),
+        "files without matches should be filtered out of fileset renders",
+    );
+    assert!(
+        !stdout.contains("more files"),
+        "filtered files should not be counted in fileset summaries",
+    );
+}
+
+#[test]
+fn grep_filtered_files_produce_identical_output() {
+    // Two invocations with identical settings: one only includes matching files,
+    // the other adds extra files with no matches. Outputs must be byte-for-byte equal.
+    let dir = tempdir().unwrap();
+    let with_a = dir.path().join("with_a.json");
+    let with_b = dir.path().join("with_b.json");
+    let without = dir.path().join("without.json");
+    std::fs::write(&with_a, br#"{"keep":"needle","other":1}"#).unwrap();
+    std::fs::write(&with_b, br#"{"keep":"needle","more":2}"#).unwrap();
+    std::fs::write(&without, br#"{"drop":0}"#).unwrap();
+
+    let base = cargo_bin_cmd!("hson")
+        .current_dir(dir.path())
+        .args([
+            "--no-color",
+            "--grep",
+            "needle",
+            "--bytes",
+            "40",
+            "--no-sort",
+            with_a.file_name().unwrap().to_str().unwrap(),
+            with_b.file_name().unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let with_extra = cargo_bin_cmd!("hson")
+        .current_dir(dir.path())
+        .args([
+            "--no-color",
+            "--grep",
+            "needle",
+            "--bytes",
+            "40",
+            "--no-sort",
+            with_a.file_name().unwrap().to_str().unwrap(),
+            with_b.file_name().unwrap().to_str().unwrap(),
+            without.file_name().unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let base_out = base.get_output().stdout.clone();
+    let extra_out = with_extra.get_output().stdout.clone();
+    assert_eq!(
+        base_out, extra_out,
+        "adding files without matches should not change grep output",
+    );
+}
+
+#[test]
+fn grep_ignores_filename_only_matches_in_filesets() {
+    let dir = tempdir().unwrap();
+    let matching = dir.path().join("foo.json");
+    let filename_match = dir.path().join("needle_only.json");
+    std::fs::write(&matching, br#"{ "keep": "needle" }"#).unwrap();
+    // No content matches; only the filename contains the pattern.
+    std::fs::write(&filename_match, br#"{ "drop": 0 }"#).unwrap();
+
+    let base = cargo_bin_cmd!("hson")
+        .current_dir(dir.path())
+        .args([
+            "--no-color",
+            "--grep",
+            "needle",
+            "--bytes",
+            "80",
+            "--no-sort",
+            matching.file_name().unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let with_filename_match = cargo_bin_cmd!("hson")
+        .current_dir(dir.path())
+        .args([
+            "--no-color",
+            "--grep",
+            "needle",
+            "--bytes",
+            "80",
+            "--no-sort",
+            matching.file_name().unwrap().to_str().unwrap(),
+            filename_match.file_name().unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let base_body = String::from_utf8_lossy(&base.get_output().stdout);
+    let with_body =
+        String::from_utf8_lossy(&with_filename_match.get_output().stdout);
+    // Fileset runs should keep only the content matches and not count filename-only
+    // matches as hits. Headers may differ, but the rendered payload should match.
+    let strip_header = |s: &str| {
+        let mut lines = s.lines();
+        if let Some(first) = lines.next() {
+            if first.starts_with("==> ") && first.ends_with(" <==") {
+                return lines.collect::<Vec<_>>().join("\n");
+            }
+        }
+        s.to_string()
+    };
+    assert_eq!(
+        strip_header(&base_body).trim_end(),
+        strip_header(&with_body).trim_end(),
+        "filenames matching the pattern should not force files into grep output",
+    );
+    assert!(
+        !with_body.contains("needle_only.json"),
+        "filename-only matches should not be rendered or counted"
+    );
+}
+
+#[test]
+fn grep_does_not_shrink_global_budget_when_filtering_filesets() {
+    // Adding a file with no matches should not reduce the effective global budget.
+    let dir = tempdir().unwrap();
+    let with_a = dir.path().join("with_a.json");
+    let with_b = dir.path().join("with_b.json");
+    let without = dir.path().join("without.json");
+    let payload = "A".repeat(400);
+    std::fs::write(&with_a, format!(r#"{{"keep":"hit","big":"{payload}"}}"#))
+        .unwrap();
+    std::fs::write(&with_b, format!(r#"{{"keep":"hit","big":"{payload}"}}"#))
+        .unwrap();
+    std::fs::write(&without, br#"{"drop":0}"#).unwrap();
+
+    let base = cargo_bin_cmd!("hson")
+        .current_dir(dir.path())
+        .args([
+            "--no-color",
+            "--no-sort",
+            "--no-header",
+            "--string-cap",
+            "2000",
+            "--global-bytes",
+            "900",
+            "--grep",
+            "hit",
+            with_a.file_name().unwrap().to_str().unwrap(),
+            with_b.file_name().unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let with_extra = cargo_bin_cmd!("hson")
+        .current_dir(dir.path())
+        .args([
+            "--no-color",
+            "--no-sort",
+            "--no-header",
+            "--string-cap",
+            "2000",
+            "--global-bytes",
+            "900",
+            "--grep",
+            "hit",
+            with_a.file_name().unwrap().to_str().unwrap(),
+            with_b.file_name().unwrap().to_str().unwrap(),
+            without.file_name().unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let base_out = base.get_output().stdout.clone();
+    let extra_out = with_extra.get_output().stdout.clone();
+    assert_eq!(
+        base_out, extra_out,
+        "adding non-matching files should not shrink the effective global budget"
     );
 }
 

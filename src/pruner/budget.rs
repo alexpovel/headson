@@ -1,6 +1,7 @@
 use crate::grep::{
     GrepState, compute_grep_state, reorder_priority_with_must_keep,
 };
+use crate::order::{NodeId, ObjectType};
 use crate::utils::measure::OutputStats;
 use crate::{GrepConfig, PriorityOrder, RenderConfig};
 
@@ -26,7 +27,8 @@ pub fn find_largest_render_under_budgets(
         return String::new();
     }
     let measure_cfg = measure_config(order_build, config);
-    let grep_state = compute_grep_state(order_build, grep);
+    let mut grep_state = compute_grep_state(order_build, grep);
+    filter_fileset_without_matches(order_build, &mut grep_state);
     reorder_if_strong_grep(order_build, &grep_state, grep);
     let effective_budgets = effective_budgets_with_grep(
         order_build,
@@ -103,6 +105,138 @@ fn reorder_if_strong_grep(
     }
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Fileset filtering logic is easier to follow inline"
+)]
+fn filter_fileset_without_matches(
+    order_build: &mut PriorityOrder,
+    state: &mut Option<GrepState>,
+) {
+    let Some(s) = state.as_mut() else {
+        return;
+    };
+    if !s.is_enabled() {
+        return;
+    }
+    if order_build
+        .object_type
+        .get(crate::order::ROOT_PQ_ID)
+        .is_none_or(|t| *t != ObjectType::Fileset)
+    {
+        return;
+    }
+    let Some(fileset_children) =
+        order_build.fileset_children.clone().or_else(|| {
+            order_build.children.get(crate::order::ROOT_PQ_ID).cloned()
+        })
+    else {
+        return;
+    };
+    if fileset_children.is_empty() {
+        return;
+    }
+
+    let Some(slot_map) = compute_fileset_slot_map(order_build) else {
+        return;
+    };
+
+    let mut keep_slots = vec![false; fileset_children.len()];
+    for (idx, keep) in s.must_keep.iter().enumerate() {
+        if !*keep {
+            continue;
+        }
+        if let Some(slot) = slot_map.get(idx).copied().flatten() {
+            if let Some(flag) = keep_slots.get_mut(slot) {
+                *flag = true;
+            }
+        }
+    }
+
+    if !keep_slots.iter().any(|k| *k) {
+        // Fallback: consider fileset children directly in case matches were only
+        // recorded on the file root.
+        for (slot, child) in fileset_children.iter().enumerate() {
+            if s.must_keep.get(child.0).copied().unwrap_or(false) {
+                if let Some(flag) = keep_slots.get_mut(slot) {
+                    *flag = true;
+                }
+            }
+        }
+    }
+
+    order_build.by_priority.retain(|node| {
+        match slot_map.get(node.0).copied().flatten() {
+            Some(slot) => keep_slots.get(slot).copied().unwrap_or(false),
+            None => true,
+        }
+    });
+
+    let mut filtered_children: Vec<NodeId> = Vec::new();
+    for (slot, child) in fileset_children.iter().enumerate() {
+        if keep_slots.get(slot).copied().unwrap_or(false) {
+            filtered_children.push(*child);
+        }
+    }
+    order_build.fileset_children = Some(filtered_children.clone());
+    if let Some(metrics) =
+        order_build.metrics.get_mut(crate::order::ROOT_PQ_ID)
+    {
+        metrics.object_len = Some(filtered_children.len());
+    }
+
+    for (idx, keep) in s.must_keep.iter_mut().enumerate() {
+        if let Some(slot) = slot_map.get(idx).copied().flatten() {
+            if !keep_slots.get(slot).copied().unwrap_or(false) {
+                *keep = false;
+            }
+        }
+    }
+    s.must_keep_count = s.must_keep.iter().filter(|b| **b).count();
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "single DFS that is clearer in one routine than split helpers"
+)]
+fn compute_fileset_slot_map(
+    order_build: &PriorityOrder,
+) -> Option<Vec<Option<usize>>> {
+    if order_build
+        .object_type
+        .get(crate::order::ROOT_PQ_ID)
+        .is_none_or(|t| *t != ObjectType::Fileset)
+    {
+        return None;
+    }
+    let children = order_build.fileset_children.as_deref().or_else(|| {
+        order_build
+            .children
+            .get(crate::order::ROOT_PQ_ID)
+            .map(|v| &**v)
+    })?;
+    if children.is_empty() {
+        return None;
+    }
+
+    let mut slots: Vec<Option<usize>> = vec![None; order_build.total_nodes];
+    for (slot, child) in children.iter().enumerate() {
+        let mut stack = vec![child.0];
+        while let Some(node_idx) = stack.pop() {
+            if slots.get(node_idx).is_some_and(Option::is_some) {
+                continue;
+            }
+            if let Some(slot_ref) = slots.get_mut(node_idx) {
+                *slot_ref = Some(slot);
+            }
+            if let Some(kids) = order_build.children.get(node_idx) {
+                stack.extend(kids.iter().map(|k| k.0));
+            }
+        }
+    }
+    Some(slots)
+}
+
 fn effective_budgets_with_grep(
     order_build: &PriorityOrder,
     measure_cfg: &RenderConfig,
@@ -155,10 +289,12 @@ fn select_best_k(
 ) -> (usize, Vec<u32>, u32) {
     let total = order_build.total_nodes;
     let lo = min_k.max(1);
+    let available = order_build.by_priority.len().max(1);
     let hi = match budgets.byte_budget {
         Some(c) => total.min(c.max(1)),
         None => total,
-    };
+    }
+    .min(available);
 
     let mut inclusion_flags: Vec<u32> = vec![0; total];
 
@@ -323,4 +459,9 @@ fn include_must_keep(
             );
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    // No internal tests here; behavior is covered by integration tests.
 }
