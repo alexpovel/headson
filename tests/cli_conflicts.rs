@@ -138,6 +138,93 @@ fn weak_grep_conflicts_with_strong_grep() {
 }
 
 #[test]
+fn tree_conflicts_with_no_header() {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("hson");
+    let assert = cmd
+        .args([
+            "--tree",
+            "--no-header",
+            "tests/fixtures/explicit/object_small.json",
+        ])
+        .assert();
+    let ok = assert.get_output().status.success();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        !ok,
+        "cli should fail when --tree and --no-header are combined"
+    );
+    let err_l = err.to_ascii_lowercase();
+    assert!(
+        err_l.contains("cannot be used with") || err_l.contains("conflict"),
+        "stderr should mention mutually exclusive flags: {err}"
+    );
+}
+
+#[test]
+fn tree_conflicts_with_compact() {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("hson");
+    let assert = cmd
+        .args([
+            "--tree",
+            "--compact",
+            "tests/fixtures/explicit/object_small.json",
+        ])
+        .assert();
+    let ok = assert.get_output().status.success();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr);
+    let err_l = err.to_ascii_lowercase();
+    assert!(
+        !ok,
+        "cli should fail when --tree and --compact are combined"
+    );
+    assert!(
+        err_l.contains("cannot be used with") || err_l.contains("conflict"),
+        "stderr should mention tree/compact are incompatible: {err}"
+    );
+}
+
+#[test]
+fn tree_conflicts_with_no_newline() {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("hson");
+    let assert = cmd
+        .args([
+            "--tree",
+            "--no-newline",
+            "tests/fixtures/explicit/object_small.json",
+        ])
+        .assert();
+    let ok = assert.get_output().status.success();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr);
+    let err_l = err.to_ascii_lowercase();
+    assert!(
+        !ok,
+        "cli should fail when --tree and --no-newline are combined"
+    );
+    assert!(
+        err_l.contains("cannot be used with") || err_l.contains("conflict"),
+        "stderr should mention tree/no-newline are incompatible: {err}"
+    );
+}
+
+#[test]
+fn tree_rejected_for_stdin() {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("hson");
+    let assert = cmd.args(["--tree"]).write_stdin("{}").assert();
+    let ok = assert.get_output().status.success();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        !ok,
+        "cli should fail when --tree is used without explicit file inputs (stdin mode)"
+    );
+    let err_l = err.to_ascii_lowercase();
+    assert!(
+        err_l.contains("tree")
+            && (err_l.contains("stdin") || err_l.contains("input")),
+        "stderr should mention tree mode requires file inputs, got: {err}"
+    );
+}
+
+#[test]
 fn grep_show_conflicts_with_weak_grep() {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("hson");
     let assert = cmd

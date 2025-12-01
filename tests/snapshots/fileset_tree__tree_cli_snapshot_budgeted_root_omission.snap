@@ -1,0 +1,12 @@
+---
+source: tests/fileset_tree.rs
+expression: stdout.as_ref()
+---
+.
+├─ a.txt
+│ line
+├─ b.txt
+│ line
+├─ c.txt
+│ line
+├─ … 2 more items

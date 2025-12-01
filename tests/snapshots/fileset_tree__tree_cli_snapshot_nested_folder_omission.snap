@@ -1,0 +1,9 @@
+---
+source: tests/fileset_tree.rs
+expression: stdout.as_ref()
+---
+.
+├─ keep/root.rs
+│ 1: fn keep(){}
+├─ omit/deep/file.rs
+│ 1: fn drop(){}

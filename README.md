@@ -76,6 +76,7 @@ Common flags:
 - `-m, --compact`: no indentation, no spaces, no newlines
 - `--no-newline`: single line output
 - `--no-header`: suppress fileset section headers (useful when embedding output in scripts)
+- `--tree`: render filesets as a directory tree with inline previews (keeps code line numbers); uses per-file auto formatting.
 - `--no-space`: no space after `:` in objects
 - `--indent <STR>`: indentation unit (default: two spaces)
 - `--string-cap <N>`: max graphemes to consider per string (default: 500)
@@ -118,6 +119,14 @@ Use `--grep <REGEX>` to guarantee inclusion of values/keys/lines matching the re
 - Budgets: matches and ancestors always render; remaining budget determines what else can appear. Extremely tight budgets may show only the must-keep path.
 - Text/code: works with `-i text` and code-like files; when using `--format auto`, file extensions still decide ingest/rendering.
 
+## Tree mode
+
+Use `--tree` to render filesets as a directory tree (like `tree`) with inline structured previews instead of per-file headers. Works with grep/weak-grep; matches are shown inside the tree.
+
+- Layout: classic tree branches (`├─`, `│`, `└─`) with continuous guides; code gutters stay visible under the tree prefix.
+- Headers: `--tree` is mutually exclusive with `--no-header`; tree mode never prints `==>` headers and relies on the tree structure instead. Files are still auto-formatted per extension (`--format` must be `auto` for filesets).
+- Budgets: tree scaffolding is treated like headers (free unless you set `--count-headers`); per-file/global budgets still apply to file content and omission markers. Tight budgets can truncate file previews within the tree, and entire files may be omitted under tiny global line budgets—omitted entries are reported as `… N more items` on the relevant folder/root.
+- Sorting: respects `--no-sort`; otherwise uses the usual frecency/mtime ordering before tree grouping.
 ## Budget Modes
 
 - Bytes (`-c/--bytes`, `-C/--global-bytes`)

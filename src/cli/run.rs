@@ -31,6 +31,9 @@ pub(crate) fn run(cli: &Cli) -> Result<(String, IgnoreNotices)> {
                 vec!["No files matched provided globs".to_string()],
             ));
         }
+        if cli.tree {
+            bail!("--tree requires file inputs; stdin mode is not supported");
+        }
         Ok((run_from_stdin(cli, &render_cfg, &grep_cfg)?, Vec::new()))
     } else {
         run_from_paths(cli, &render_cfg, &grep_cfg, &resolved_inputs)
@@ -134,7 +137,7 @@ fn run_from_paths(
     let input_count = included.max(1);
     let effective = budget::compute_effective(cli, input_count);
     let prio = budget::build_priority_config(cli, &effective);
-    if inputs.len() > 1 {
+    if inputs.len() > 1 || cli.tree {
         if !matches!(cli.format, OutputFormat::Auto) {
             bail!(
                 "--format cannot be customized for filesets; remove it or set to auto"
