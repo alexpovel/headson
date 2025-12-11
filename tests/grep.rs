@@ -37,6 +37,34 @@ fn grep_guarantees_match_even_when_budget_is_tiny() {
 }
 
 #[test]
+fn grep_counts_matches_as_free_for_char_budgets() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.txt");
+    std::fs::write(
+        &path,
+        "this line has a match keyword and is long\nshort\n",
+    )
+    .unwrap();
+    let assert = cargo_bin_cmd!("hson")
+        .current_dir(dir.path())
+        .args([
+            "--no-color",
+            "--chars",
+            "15",
+            "--grep",
+            "keyword",
+            path.file_name().unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("short"),
+        "non-matching context should still render when matches are free under char budgets; got: {stdout:?}"
+    );
+}
+
+#[test]
 fn grep_keeps_ancestor_path_for_matches() {
     let input = br#"{"outer":{"inner":{"value":"match-me"}}}"#.to_vec();
     let assert = cargo_bin_cmd!("hson")
@@ -708,9 +736,11 @@ fn grep_highlights_for_library_calls_without_extra_config() {
     };
     let prio = PriorityConfig::new(usize::MAX, usize::MAX);
     let budgets = Budgets {
-        byte_budget: Some(200),
-        char_budget: None,
-        line_budget: None,
+        global: Some(headson::Budget {
+            kind: headson::BudgetKind::Bytes,
+            cap: 200,
+        }),
+        per_slot: None,
     };
     let grep = GrepConfig {
         regex: Some(regex::Regex::new("needle").unwrap()),
@@ -889,5 +919,34 @@ fn weak_grep_fileset_with_no_matches_still_renders_and_has_no_notice() {
     assert!(
         !stderr.contains("No grep matches found"),
         "weak grep should not emit the strong-grep notice when there are no matches"
+    );
+}
+
+#[test]
+fn strong_grep_obeys_zero_global_line_budget_for_non_matches() {
+    let input = br#"{"keep":"needle","drop":"filler"}"#.to_vec();
+    let assert = cargo_bin_cmd!("hson")
+        .args([
+            "--no-color",
+            "--no-sort",
+            "--grep",
+            "needle",
+            "--grep-show",
+            "all",
+            "--global-lines",
+            "0",
+        ])
+        .write_stdin(input)
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("needle"),
+        "strong grep should still surface matching content when budgets are zeroed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("drop"),
+        "non-matching content should be excluded when no global line headroom remains: {stdout}"
     );
 }

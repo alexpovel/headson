@@ -15,9 +15,14 @@ k: 2
 DEBUG (normalized):
 {
   "budgets_effective": {
-    "bytes": 40000,
-    "chars": null,
-    "lines": null
+    "global": {
+      "cap": 40000,
+      "kind": "bytes"
+    },
+    "per_slot": {
+      "cap": 20000,
+      "kind": "bytes"
+    }
   },
   "counts": {
     "included": 0,

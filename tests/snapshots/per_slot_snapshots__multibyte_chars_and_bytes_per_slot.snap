@@ -1,0 +1,9 @@
+---
+source: tests/per_slot_snapshots.rs
+expression: normalize(&out)
+---
+==> tests/fixtures/bytes_chars/emoji.json <==
+"…"
+
+==> tests/fixtures/bytes_chars/long.txt <==
+…

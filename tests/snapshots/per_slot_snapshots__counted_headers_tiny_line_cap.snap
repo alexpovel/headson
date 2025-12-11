@@ -1,0 +1,7 @@
+---
+source: tests/per_slot_snapshots.rs
+expression: normalize(&out)
+---
+
+
+==> 3 more files <==

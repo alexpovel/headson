@@ -20,6 +20,7 @@
 
 use anyhow::Result;
 
+pub mod budget;
 mod debug;
 mod grep;
 mod ingest;
@@ -37,7 +38,9 @@ pub use order::{
 pub use utils::extensions;
 pub use utils::templates::map_json_template_for_style;
 
-pub use pruner::budget::{Budgets, find_largest_render_under_budgets};
+pub use pruner::budget::{
+    Budget, BudgetKind, Budgets, find_largest_render_under_budgets,
+};
 pub use serialization::color::resolve_color_enabled;
 pub use serialization::types::{
     ColorMode, ColorStrategy, OutputTemplate, RenderConfig, Style,

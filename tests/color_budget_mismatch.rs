@@ -58,9 +58,11 @@ fn colored_and_plain_outputs_should_match_after_stripping() {
     let budget = 50usize;
 
     let budgets = headson::Budgets {
-        byte_budget: Some(budget),
-        char_budget: None,
-        line_budget: None,
+        global: Some(headson::Budget {
+            kind: headson::BudgetKind::Bytes,
+            cap: budget,
+        }),
+        per_slot: None,
     };
     let grep = headson::GrepConfig::default();
 

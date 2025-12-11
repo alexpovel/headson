@@ -82,9 +82,11 @@ environments:
         &priority_config(),
         &grep,
         Budgets {
-            byte_budget: Some(4096),
-            char_budget: None,
-            line_budget: None,
+            global: Some(headson::Budget {
+                kind: headson::BudgetKind::Bytes,
+                cap: 4096,
+            }),
+            per_slot: None,
         },
     )
     .expect("render fileset");

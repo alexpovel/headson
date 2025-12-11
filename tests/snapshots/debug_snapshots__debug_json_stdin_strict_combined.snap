@@ -13,9 +13,14 @@ STDOUT:
 DEBUG (normalized):
 {
   "budgets_effective": {
-    "bytes": 200,
-    "chars": null,
-    "lines": null
+    "global": {
+      "cap": 200,
+      "kind": "bytes"
+    },
+    "per_slot": {
+      "cap": 200,
+      "kind": "bytes"
+    }
   },
   "counts": {
     "included": 0,

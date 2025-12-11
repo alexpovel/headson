@@ -80,7 +80,7 @@ Common flags:
 - `--no-space`: no space after `:` in objects
 - `--indent <STR>`: indentation unit (default: two spaces)
 - `--string-cap <N>`: max graphemes to consider per string (default: 500)
-- `--grep <REGEX>`: guarantee inclusion of values/keys/lines matching the regex (ripgrep‑style). Matches + ancestors are “free”; budgets apply to everything else. If matches consume all headroom, only the must‑keep path is shown. Colors follow the normal on/auto/off rules; when grep is active, syntax colors are suppressed and only the match highlights are colored. JSON/YAML structural punctuation is not highlighted—only the matching key/value text.
+- `--grep <REGEX>`: guarantee inclusion of values/keys/lines matching the regex (ripgrep‑style). Matches + ancestors are “free” against both global and per-file caps; budgets apply to everything else. If matches consume all headroom, only the must‑keep path is shown. Colors follow the normal on/auto/off rules; when grep is active, syntax colors are suppressed and only the match highlights are colored. JSON/YAML structural punctuation is not highlighted—only the matching key/value text.
 - `--head`: prefer the beginning of arrays when truncating (keep first N). Strings are unaffected. Display styles place omission markers accordingly; strict JSON remains unannotated. Mutually exclusive with `--tail`.
 - `--tail`: prefer the end of arrays when truncating (keep last N). Strings are unaffected. Display styles place omission markers accordingly; strict JSON remains unannotated. Mutually exclusive with `--head`.
 
@@ -99,10 +99,12 @@ Notes:
 
 ### Working with multiple files
 
-- Budgets: per-file caps (`--bytes`/`--chars`/`--lines`) apply to each input; global caps (`--global-*`) constrain the combined output. Default byte budget scales by input count when no globals are set.
+- Budgets: per-file caps (`--bytes`/`--chars`/`--lines`) apply to each input; global caps (`--global-*`) constrain the combined output when set. Default byte/char budgets scale by input count when no globals are set; line caps stay per-file unless you pass `--global-lines`.
+- One metric per level: pick at most one per-file budget flag (`--bytes` | `--chars` | `--lines`) and at most one global flag (`--global-bytes` | `--global-lines`). Mixing per-file and global kinds is allowed (e.g., per-file lines + global bytes); conflicting flags error.
 - Sorting: inputs are pre-sorted by git frecency (frecenfile) with last-modified-time fallback so recently touched files appear first. Pass `--no-sort` to preserve the order you provided and skip repo scanning.
 - Headers: fileset sections get `==>` headers when newlines are enabled; hide them with `--no-header`. Compact and single-line modes omit headers automatically.
 - Formats: in `--format auto`, each file picks JSON/YAML/Text based on extension; unknowns fall back to Text so mixed filesets “just work.”
+- Per-file caps: omission markers count toward per-file line budgets; a per-file line cap of zero suppresses the file entirely, even when headers are counted.
 
 ## Grep mode
 
@@ -126,7 +128,8 @@ Use `--tree` to render filesets as a directory tree (like `tree`) with inline st
 
 - Layout: classic tree branches (`├─`, `│`, `└─`) with continuous guides; code gutters stay visible under the tree prefix.
 - Headers: `--tree` is mutually exclusive with `--no-header`; tree mode never prints `==>` headers and relies on the tree structure instead. Files are still auto-formatted per extension (`--format` must be `auto` for filesets).
-- Budgets: tree scaffolding is treated like headers (free unless you set `--count-headers`); per-file/global budgets still apply to file content and omission markers. Tight budgets can truncate file previews within the tree, and entire files may be omitted under tiny global line budgets—omitted entries are reported as `… N more items` on the relevant folder/root.
+- Budgets: tree scaffolding is treated like headers (free unless you set `--count-headers`); per-file budgets always apply to file content and omission markers, and global caps apply only when provided. Tight budgets can truncate file previews within the tree, and entire files may be omitted under tiny global line budgets—omitted entries are reported as `… N more items` on the relevant folder/root. When scaffold is free, the final output can exceed the requested caps by the tree gutters/indentation; set `--count-headers` if those characters must be bounded.
+- Empty sections: under very small per-file caps (or a tiny global cap, if set), files or code blocks may render only their header/tree entry with no body; omission markers appear only when at least one child fits. This is expected when nothing fits beneath the budget.
 - Sorting: respects `--no-sort`; otherwise uses the usual frecency/mtime ordering before tree grouping.
 - Fairness: file contents are interleaved round‑robin in the priority order so later files still surface under tight budgets.
 ## Budget Modes
@@ -142,11 +145,13 @@ Use `--tree` to render filesets as a directory tree (like `tree`) with inline st
 - Lines (`-n/--lines`, `-N/--global-lines`)
   - Caps the number of lines in the output.
   - Incompatible with `--no-newline`.
-  - Multiple inputs: defaults to `<LINES> * number_of_inputs`; `--global-lines` caps the total.
+  - Multiple inputs: `<LINES>` is enforced per file; add `--global-lines` if you also need an aggregate cap.
   - Fileset headers, blank separators, and summary lines do not count toward the line cap by default; only actual content lines are considered. Pass `-H/--count-headers` to include headers/summaries in the line budget.
+  - Tiny caps may yield omission markers instead of bodies (e.g., `…` for text/code, `{…}`/`[…]` for objects/arrays); a single-line file still renders when it fits.
 
 - Interactions and precedence
   - All active budgets are enforced simultaneously. The render must satisfy all of: bytes (if set), chars (if set), and lines (if set). The strictest cap wins.
+  - Outputs stay non-empty unless you explicitly set a per-file cap of zero; in that case that slot can be suppressed entirely (matching the CLI’s `-n 0` semantics). Extremely tight nonzero caps that cannot fit even an omission marker can also yield empty output; filesets/tree may show only omission counts in that scenario.
   - When only lines are specified, no implicit byte cap applies. When neither lines nor chars are specified, a 500‑byte default applies.
 
 Quick one‑liners:
