@@ -6,6 +6,9 @@ use crate::utils::measure::{OutputStats, count_output_stats};
 use crate::{GrepConfig, PriorityOrder, RenderConfig};
 use std::collections::VecDeque;
 
+mod select;
+use select::{SelectionContext, select_best_k};
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BudgetKind {
     Bytes,
@@ -111,11 +114,13 @@ impl Budgets {
     }
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    clippy::too_many_lines,
-    reason = "Top-level orchestrator; splitting would obscure the budget/search flow"
-)]
+fn is_fileset_root(order_build: &PriorityOrder) -> bool {
+    order_build
+        .object_type
+        .get(crate::order::ROOT_PQ_ID)
+        .is_some_and(|t| *t == ObjectType::Fileset)
+}
+
 pub fn find_largest_render_under_budgets(
     order_build: &mut PriorityOrder,
     config: &RenderConfig,
@@ -126,19 +131,9 @@ pub fn find_largest_render_under_budgets(
     if total == 0 {
         return String::new();
     }
-    let root_is_fileset = order_build
-        .object_type
-        .get(crate::order::ROOT_PQ_ID)
-        .is_some_and(|t| *t == ObjectType::Fileset);
+    let root_is_fileset = is_fileset_root(order_build);
     let mut grep_state = compute_grep_state(order_build, grep);
-    if !grep.weak
-        && grep.show == GrepShow::Matching
-        && grep.regex.is_some()
-        && grep_state.is_none()
-        && order_build
-            .object_type
-            .get(crate::order::ROOT_PQ_ID)
-            .is_some_and(|t| *t == ObjectType::Fileset)
+    if strong_fileset_grep_without_matches(grep, &grep_state, root_is_fileset)
     {
         return String::new();
     }
@@ -154,103 +149,106 @@ pub fn find_largest_render_under_budgets(
     let measure_cfg = measure_config(order_build, config, header_budgeting);
     let min_k = min_k_for(&grep_state, grep);
     let must_keep_slice = must_keep_slice(&grep_state, grep);
+    let selection_ctx = SelectionContext {
+        order_build,
+        measure_cfg: &measure_cfg,
+        budgets,
+        min_k,
+        must_keep: must_keep_slice,
+        grep,
+        state: &grep_state,
+        fileset_slots: fileset_slots.as_ref(),
+    };
+    let finalize_ctx = FinalizeContext {
+        budgets,
+        fileset_slots: fileset_slots.as_ref(),
+        measure_cfg: &measure_cfg,
+        grep,
+        grep_state: &grep_state,
+        must_keep: must_keep_slice,
+    };
+    finalize_render_from_selection(
+        order_build,
+        config,
+        header_budgeting,
+        select_best_k(&selection_ctx),
+        root_is_fileset,
+        &finalize_ctx,
+    )
+    .unwrap_or_default()
+}
+
+struct FinalizeContext<'a> {
+    budgets: Budgets,
+    fileset_slots: Option<&'a FilesetSlots>,
+    measure_cfg: &'a RenderConfig,
+    grep: &'a GrepConfig,
+    grep_state: &'a Option<GrepState>,
+    must_keep: Option<&'a [bool]>,
+}
+
+fn finalize_render_from_selection(
+    order_build: &mut PriorityOrder,
+    config: &RenderConfig,
+    header_budgeting: HeadersBudgeting,
+    selection: SelectionOutcome,
+    root_is_fileset: bool,
+    finalize_ctx: &FinalizeContext<'_>,
+) -> Option<String> {
     let SelectionOutcome {
         k: k_opt,
         mut inclusion_flags,
         render_set_id,
         selection_order,
-    } = select_best_k(
-        order_build,
-        &measure_cfg,
-        budgets,
-        min_k,
-        must_keep_slice,
-        grep,
-        &grep_state,
-        fileset_slots.as_ref(),
-    );
+    } = selection;
     let found_k = k_opt.is_some();
     let k = k_opt.unwrap_or(0);
-    if budgets.per_slot_zero_cap() {
-        return String::new();
-    }
-    if k == 0
-        && must_keep_slice.is_none()
-        && !budgets.per_slot_active()
-        && !root_is_fileset
-    {
-        return String::new();
-    }
-    if !found_k && must_keep_slice.is_none() && !root_is_fileset {
-        return String::new();
+    if should_short_circuit_after_selection(
+        &finalize_ctx.budgets,
+        finalize_ctx.must_keep,
+        root_is_fileset,
+        found_k,
+        k,
+    ) {
+        return None;
     }
     inclusion_flags.fill(0);
-    let per_slot_caps_active = budgets.per_slot_active();
+    let per_slot_caps_active = finalize_ctx.budgets.per_slot_active();
 
-    if let Some(order) = selection_order.as_deref() {
-        mark_custom_top_k_and_ancestors(
-            order_build,
-            order,
-            k,
-            &mut inclusion_flags,
-            render_set_id,
-        );
-    } else {
-        crate::serialization::prepare_render_set_top_k_and_ancestors(
-            order_build,
-            k,
-            &mut inclusion_flags,
-            render_set_id,
-        );
-    }
-    if let Some(state) = &grep_state {
-        if !grep.weak && state.is_enabled() {
-            include_must_keep(
-                order_build,
-                &mut inclusion_flags,
-                render_set_id,
-                &state.must_keep,
-            );
-        }
-    }
+    apply_selection(
+        order_build,
+        selection_order.as_deref(),
+        k,
+        &mut inclusion_flags,
+        render_set_id,
+    );
+    include_strong_grep_must_keep(
+        order_build,
+        finalize_ctx.grep,
+        finalize_ctx.grep_state,
+        &mut inclusion_flags,
+        render_set_id,
+    );
     if per_slot_caps_active && !config.count_fileset_headers_in_budgets {
         ensure_fileset_headers_for_empty_slots(
             order_build,
             render_set_id,
             &mut inclusion_flags,
-            &budgets,
-            &measure_cfg,
-            fileset_slots.as_ref(),
+            &finalize_ctx.budgets,
+            finalize_ctx.measure_cfg,
+            finalize_ctx.fileset_slots,
             header_budgeting,
         );
     }
 
-    if per_slot_caps_active
-        && matches!(
-            budgets.per_slot,
-            Some(Budget {
-                kind: BudgetKind::Lines,
-                cap: 0
-            })
-        )
-    {
-        if let Some(slots) = fileset_slots.as_ref() {
-            let has_included_slot =
-                inclusion_flags.iter().enumerate().any(|(idx, flag)| {
-                    *flag == render_set_id
-                        && slots
-                            .map
-                            .get(idx)
-                            .and_then(|s| *s)
-                            .is_some_and(|_| true)
-                });
-            if !has_included_slot {
-                return String::new();
-            }
-        }
-        if !root_is_fileset {
-            return String::new();
-        }
+    if should_short_circuit_zero_line_slots(
+        &finalize_ctx.budgets,
+        finalize_ctx.fileset_slots,
+        &inclusion_flags,
+        render_set_id,
+        root_is_fileset,
+    ) {
+        return None;
     }
 
     if config.debug {
@@ -259,12 +257,12 @@ pub fn find_largest_render_under_budgets(
             &inclusion_flags,
             render_set_id,
             config,
-            budgets,
+            finalize_ctx.budgets,
             k,
         );
     }
 
-    crate::serialization::render_from_render_set(
+    Some(crate::serialization::render_from_render_set(
         order_build,
         &inclusion_flags,
         render_set_id,
@@ -272,14 +270,121 @@ pub fn find_largest_render_under_budgets(
             grep_highlight: config
                 .grep_highlight
                 .clone()
-                .or_else(|| grep.regex.clone()),
+                .or_else(|| finalize_ctx.grep.regex.clone()),
             ..config.clone()
         },
-    )
+    ))
+}
+
+fn strong_fileset_grep_without_matches(
+    grep: &GrepConfig,
+    state: &Option<GrepState>,
+    root_is_fileset: bool,
+) -> bool {
+    !grep.weak
+        && matches!(grep.show, GrepShow::Matching)
+        && grep.regex.is_some()
+        && state.is_none()
+        && root_is_fileset
 }
 
 fn is_strong_grep(grep: &GrepConfig, state: &Option<GrepState>) -> bool {
     state.as_ref().is_some_and(GrepState::is_enabled) && !grep.weak
+}
+
+fn apply_selection(
+    order_build: &PriorityOrder,
+    selection_order: Option<&[NodeId]>,
+    k: usize,
+    inclusion_flags: &mut Vec<u32>,
+    render_set_id: u32,
+) {
+    if let Some(order) = selection_order {
+        mark_custom_top_k_and_ancestors(
+            order_build,
+            order,
+            k,
+            inclusion_flags,
+            render_set_id,
+        );
+    } else {
+        crate::serialization::prepare_render_set_top_k_and_ancestors(
+            order_build,
+            k,
+            inclusion_flags,
+            render_set_id,
+        );
+    }
+}
+
+fn include_strong_grep_must_keep(
+    order_build: &PriorityOrder,
+    grep: &GrepConfig,
+    grep_state: &Option<GrepState>,
+    inclusion_flags: &mut [u32],
+    render_set_id: u32,
+) {
+    if !is_strong_grep(grep, grep_state) {
+        return;
+    }
+    if let Some(state) = grep_state {
+        include_must_keep(
+            order_build,
+            inclusion_flags,
+            render_set_id,
+            &state.must_keep,
+        );
+    }
+}
+
+fn should_short_circuit_after_selection(
+    budgets: &Budgets,
+    must_keep_slice: Option<&[bool]>,
+    root_is_fileset: bool,
+    found_k: bool,
+    k: usize,
+) -> bool {
+    if budgets.per_slot_zero_cap() {
+        return true;
+    }
+    if k == 0
+        && must_keep_slice.is_none()
+        && !budgets.per_slot_active()
+        && !root_is_fileset
+    {
+        return true;
+    }
+    if !found_k && must_keep_slice.is_none() && !root_is_fileset {
+        return true;
+    }
+    false
+}
+
+fn should_short_circuit_zero_line_slots(
+    budgets: &Budgets,
+    fileset_slots: Option<&FilesetSlots>,
+    inclusion_flags: &[u32],
+    render_set_id: u32,
+    root_is_fileset: bool,
+) -> bool {
+    let Some(Budget {
+        kind: BudgetKind::Lines,
+        cap: 0,
+    }) = budgets.per_slot
+    else {
+        return false;
+    };
+    if let Some(slots) = fileset_slots {
+        let has_included_slot =
+            inclusion_flags.iter().enumerate().any(|(idx, flag)| {
+                *flag == render_set_id
+                    && slots.map.get(idx).and_then(|s| *s).is_some()
+            });
+        if !has_included_slot {
+            return true;
+        }
+    }
+    !root_is_fileset
 }
 
 fn reorder_if_grep(
@@ -456,11 +561,7 @@ fn header_budgeting_policy(
     order_build: &PriorityOrder,
     config: &RenderConfig,
 ) -> HeadersBudgeting {
-    let root_is_fileset = order_build
-        .object_type
-        .get(ROOT_PQ_ID)
-        .is_some_and(|t| *t == ObjectType::Fileset);
-    if !root_is_fileset || !config.show_fileset_headers {
+    if !is_fileset_root(order_build) || !config.show_fileset_headers {
         return HeadersBudgeting::Free;
     }
     if config.count_fileset_headers_in_budgets {
@@ -629,191 +730,6 @@ fn must_keep_slice<'a>(
         .as_ref()
         .filter(|_| !grep.weak)
         .and_then(|s| s.is_enabled().then_some(s.must_keep.as_slice()))
-}
-
-#[allow(
-    clippy::cognitive_complexity,
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    reason = "Budget search is clearer as a single routine."
-)]
-fn select_best_k(
-    order_build: &PriorityOrder,
-    measure_cfg: &RenderConfig,
-    budgets: Budgets,
-    min_k: usize,
-    must_keep: Option<&[bool]>,
-    grep: &GrepConfig,
-    state: &Option<GrepState>,
-    fileset_slots: Option<&FilesetSlots>,
-) -> SelectionOutcome {
-    let total = order_build.total_nodes;
-    let zero_global_cap =
-        matches!(budgets.global, Some(Budget { cap: 0, .. }));
-    let per_slot_caps_active = budgets.per_slot.is_some();
-    let slot_count = fileset_slots.map(|s| s.count);
-    let allow_zero =
-        must_keep.is_some() || budgets.per_slot.is_some() || zero_global_cap;
-    let mut base_lo = if allow_zero { 0 } else { min_k.max(1) };
-    if per_slot_caps_active {
-        base_lo = base_lo.max(slot_count.unwrap_or(0));
-    }
-    let selection_order = if per_slot_caps_active {
-        fileset_slots
-            .and_then(|slots| round_robin_slot_priority(order_build, slots))
-    } else {
-        None
-    };
-    let selection_order_ref: &[NodeId] = selection_order
-        .as_deref()
-        .unwrap_or(&order_build.by_priority);
-    let available = selection_order_ref.len().max(1);
-    let capped_lo = base_lo.min(available);
-    let hi = match budgets.global {
-        Some(Budget { cap: 0, .. }) => 0,
-        Some(Budget {
-            kind: BudgetKind::Bytes,
-            cap,
-        }) => total.min(cap.max(1)),
-        _ => total,
-    }
-    .min(available);
-    let effective_lo = capped_lo;
-    let effective_hi = hi.max(effective_lo);
-
-    let mut inclusion_flags: Vec<u32> = vec![0; total];
-
-    let mut render_set_id: u32 = 1;
-    let mut best_k: Option<usize> = None;
-    let measure_chars = budgets.measure_chars();
-    let free_allowance = effective_budgets_with_grep(
-        order_build,
-        measure_cfg,
-        grep,
-        state,
-        fileset_slots,
-        measure_chars,
-    );
-    let (mk_stats, mk_slots) = if let Some(flags) = must_keep {
-        if let Some((mk, mk_slots)) = free_allowance {
-            let slots = if per_slot_caps_active {
-                mk_slots.or_else(|| Some(vec![mk]))
-            } else {
-                mk_slots
-            };
-            (Some(mk), slots)
-        } else {
-            let (mk, mk_slots) = measure_must_keep_with_slots(
-                order_build,
-                measure_cfg,
-                flags,
-                measure_chars,
-                fileset_slots,
-            );
-            let slots = if per_slot_caps_active {
-                mk_slots.or_else(|| Some(vec![mk]))
-            } else {
-                mk_slots
-            };
-            (Some(mk), slots)
-        }
-    } else {
-        (None, None)
-    };
-    let apply_must_keep = must_keep.is_some();
-    if apply_must_keep {
-        if let Some(b) = budgets.global {
-            if b.cap == 0 {
-                return SelectionOutcome {
-                    k: Some(0),
-                    inclusion_flags,
-                    render_set_id,
-                    selection_order,
-                };
-            }
-        }
-    }
-    let effective_min_k = if apply_must_keep { effective_lo } else { 0 };
-    let _ = crate::pruner::search::binary_search_max(
-        effective_lo.max(effective_min_k),
-        effective_hi,
-        |mid| {
-            let current_render_id = render_set_id;
-            mark_custom_top_k_and_ancestors(
-                order_build,
-                selection_order_ref,
-                mid,
-                &mut inclusion_flags,
-                current_render_id,
-            );
-            if let Some(flags) = must_keep {
-                if apply_must_keep {
-                    include_must_keep(
-                        order_build,
-                        &mut inclusion_flags,
-                        current_render_id,
-                        flags,
-                    );
-                }
-            }
-            let mut recorder = slot_count.map(|n| {
-                crate::serialization::output::SlotStatsRecorder::new(
-                    n,
-                    measure_chars,
-                )
-            });
-            let (s, mut slot_stats) =
-                crate::serialization::render_from_render_set_with_slots(
-                    order_build,
-                    &inclusion_flags,
-                    current_render_id,
-                    measure_cfg,
-                    fileset_slots.map(|slots| slots.map.as_slice()),
-                    recorder.take(),
-                );
-            let render_stats =
-                crate::utils::measure::count_output_stats(&s, measure_chars);
-            let mut adjusted_stats = render_stats;
-            if let Some(mk) = mk_stats.as_ref() {
-                adjusted_stats.bytes =
-                    adjusted_stats.bytes.saturating_sub(mk.bytes);
-                adjusted_stats.chars =
-                    adjusted_stats.chars.saturating_sub(mk.chars);
-                adjusted_stats.lines =
-                    adjusted_stats.lines.saturating_sub(mk.lines);
-            }
-            if per_slot_caps_active && slot_stats.is_none() {
-                slot_stats = Some(vec![render_stats]);
-            }
-            let fits_global = budgets
-                .global
-                .map(|b| !b.exceeds(&adjusted_stats))
-                .unwrap_or(true);
-            let fits_per_slot = if per_slot_caps_active {
-                fits_per_slot_cap(
-                    budgets.per_slot,
-                    &adjusted_stats,
-                    slot_stats.as_deref(),
-                    mk_slots.as_deref(),
-                )
-            } else {
-                true
-            };
-            render_set_id = render_set_id.wrapping_add(1).max(1);
-            if fits_global && fits_per_slot {
-                best_k = Some(mid);
-                true
-            } else {
-                false
-            }
-        },
-    );
-    SelectionOutcome {
-        k: best_k,
-        inclusion_flags,
-        render_set_id,
-        selection_order,
-    }
 }
 
 #[allow(
@@ -999,7 +915,7 @@ fn mark_custom_top_k_and_ancestors(
 #[allow(
     clippy::cognitive_complexity,
     clippy::too_many_arguments,
-    reason = "Single walk over render flags; splitting would obscure the slot/header handling."
+    reason = "Header insertion must juggle per-slot state, budgeting policy, and tree marking in one pass; splitting would hurt readability."
 )]
 fn ensure_fileset_headers_for_empty_slots(
     order_build: &PriorityOrder,
@@ -1028,8 +944,10 @@ fn ensure_fileset_headers_for_empty_slots(
     }
     let measure_chars = budgets.measure_chars();
     let newline_len = measure_cfg.newline.len();
+    let zero_per_slot =
+        matches!(budgets.per_slot, Some(Budget { cap: 0, .. }));
     for slot_idx in 0..slots.count {
-        let has_slot_node =
+        let slot_has_nodes =
             inclusion_flags.iter().enumerate().any(|(idx, flag)| {
                 *flag == render_id
                     && slots
@@ -1038,10 +956,7 @@ fn ensure_fileset_headers_for_empty_slots(
                         .and_then(|s| *s)
                         .is_some_and(|s| s == slot_idx)
             });
-        if has_slot_node {
-            continue;
-        }
-        if matches!(budgets.per_slot, Some(Budget { cap: 0, .. })) {
+        if slot_has_nodes || zero_per_slot {
             continue;
         }
         let header_stats = header_stats_for_slot(
@@ -1067,7 +982,7 @@ fn ensure_fileset_headers_for_empty_slots(
 
 #[allow(
     clippy::cognitive_complexity,
-    reason = "Header measurement includes conditional branches for caps/kinds; splitting would obscure the budget logic."
+    reason = "Header measurement branches on name presence and budget kinds; keeping it in one routine makes the cap checks traceable."
 )]
 fn header_stats_for_slot(
     slot_idx: usize,
@@ -1076,34 +991,34 @@ fn header_stats_for_slot(
     newline_len: usize,
     budgets: &Budgets,
 ) -> Option<OutputStats> {
-    let header_stats =
-        if let Some(name) = header_names.and_then(|n| n.get(slot_idx)) {
-            let mut stats =
+    let stats = match header_names.and_then(|n| n.get(slot_idx)) {
+        Some(name) => {
+            let mut s =
                 count_output_stats(&format!("==> {name} <=="), measure_chars);
-            stats.lines = stats.lines.max(1);
-            stats.bytes = stats.bytes.saturating_add(newline_len);
+            s.lines = s.lines.max(1);
+            s.bytes = s.bytes.saturating_add(newline_len);
             if measure_chars {
-                stats.chars = stats.chars.saturating_add(newline_len);
+                s.chars = s.chars.saturating_add(newline_len);
             }
-            stats
-        } else {
-            OutputStats {
-                bytes: newline_len,
-                chars: if measure_chars { newline_len } else { 0 },
-                lines: 1,
-            }
-        };
+            s
+        }
+        None => OutputStats {
+            bytes: newline_len,
+            chars: if measure_chars { newline_len } else { 0 },
+            lines: 1,
+        },
+    };
     if let Some(cap) = budgets.per_slot {
-        let exceeds = match cap.kind {
-            BudgetKind::Bytes => header_stats.bytes > cap.cap,
-            BudgetKind::Chars => header_stats.chars > cap.cap,
-            BudgetKind::Lines => header_stats.lines > cap.cap,
+        let value = match cap.kind {
+            BudgetKind::Bytes => stats.bytes,
+            BudgetKind::Chars => stats.chars,
+            BudgetKind::Lines => stats.lines,
         };
-        if exceeds {
+        if value > cap.cap {
             return None;
         }
     }
-    Some(header_stats)
+    Some(stats)
 }
 
 #[cfg(test)]
