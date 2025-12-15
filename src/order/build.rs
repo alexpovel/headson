@@ -85,24 +85,10 @@ fn collect_round_robin(
     new_order
 }
 
-/// Reorder `by_priority` so each fileset contributes one node before any file
-/// gets a second turn. This keeps tight budgets from starving later files.
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "Small bucket shuffle helper reads clearer inline than split"
-)]
-fn interleave_fileset_priority(
-    by_priority: &mut Vec<NodeId>,
-    node_slots: &[Option<usize>],
-    file_count: usize,
+fn place_roots_front(
+    mut buckets: Vec<VecDeque<NodeId>>,
     file_roots: &[NodeId],
-) {
-    if file_count == 0 {
-        return;
-    }
-    let (prefix, buckets) =
-        split_priority_by_slot(by_priority, node_slots, file_count);
-    let mut buckets = buckets;
+) -> Vec<VecDeque<NodeId>> {
     for (slot, bucket) in buckets.iter_mut().enumerate() {
         if let Some(root) = file_roots.get(slot) {
             if let Some(pos) = bucket.iter().position(|id| id == root) {
@@ -114,6 +100,22 @@ fn interleave_fileset_priority(
             }
         }
     }
+    buckets
+}
+
+/// Reorder `by_priority` so each fileset contributes one node before any file
+/// gets a second turn. This keeps tight budgets from starving later files.
+fn interleave_fileset_priority(
+    by_priority: &mut Vec<NodeId>,
+    node_slots: &[Option<usize>],
+    file_roots: &[NodeId],
+) {
+    if file_roots.is_empty() {
+        return;
+    }
+    let (prefix, buckets) =
+        split_priority_by_slot(by_priority, node_slots, file_roots.len());
+    let buckets = place_roots_front(buckets, file_roots);
     let new_order = collect_round_robin(prefix, buckets, by_priority.len());
     *by_priority = new_order;
 }
@@ -821,8 +823,7 @@ pub fn build_order(
                 ids.push(NodeId(*pq_id));
             }
         }
-        let file_count = root.children_len;
-        interleave_fileset_priority(&mut order, &node_slots, file_count, &ids);
+        interleave_fileset_priority(&mut order, &node_slots, &ids);
         Some(ids)
     } else {
         None
@@ -858,250 +859,51 @@ fn compute_duplicate_line_counts(
     arena: &JsonTreeArena,
     slots: Option<&[Option<usize>]>,
 ) -> DuplicateCounts {
-    use std::collections::HashMap;
+    fn normalized_token(token: &str) -> Option<String> {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    fn bump(
+        token: &str,
+        slot: Option<usize>,
+        global: &mut HashMap<String, usize>,
+        per_file: &mut Option<Vec<HashMap<String, usize>>>,
+    ) {
+        *global.entry(token.to_string()).or_insert(0) += 1;
+        if let (Some(slot), Some(per_file)) = (slot, per_file.as_mut()) {
+            if let Some(map) = per_file.get_mut(slot) {
+                *map.entry(token.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
     let mut global: HashMap<String, usize> = HashMap::new();
-    let mut per_file: Option<Vec<HashMap<String, usize>>> = None;
-    if let Some(slot_map) = slots {
+    let mut per_file: Option<Vec<HashMap<String, usize>>> = slots.map(|_| {
         let file_count = arena
             .nodes
             .get(arena.root_id)
             .map(|n| n.children_len)
             .unwrap_or(0);
-        per_file = Some(vec![HashMap::new(); file_count]);
-        for (idx, node) in arena.nodes.iter().enumerate() {
-            if let Some(token) = node.atomic_token.as_ref() {
-                let norm = token.trim();
-                if norm.is_empty() {
-                    continue;
-                }
-                *global.entry(norm.to_string()).or_insert(0) += 1;
-                if let Some(slot) = slot_map.get(idx).copied().flatten() {
-                    if let Some(vec) = per_file.as_mut() {
-                        if let Some(map) = vec.get_mut(slot) {
-                            *map.entry(norm.to_string()).or_insert(0) += 1;
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        for node in &arena.nodes {
-            if let Some(token) = node.atomic_token.as_ref() {
-                let norm = token.trim();
-                if norm.is_empty() {
-                    continue;
-                }
-                *global.entry(norm.to_string()).or_insert(0) += 1;
-            }
-        }
+        vec![HashMap::new(); file_count]
+    });
+
+    for (idx, node) in arena.nodes.iter().enumerate() {
+        let Some(token) =
+            node.atomic_token.as_deref().and_then(normalized_token)
+        else {
+            continue;
+        };
+        let slot = slots.and_then(|map| map.get(idx).copied().flatten());
+        bump(&token, slot, &mut global, &mut per_file);
     }
+
     DuplicateCounts { global, per_file }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use insta::assert_snapshot;
-
-    #[test]
-    fn duplicate_lines_penalized_in_code_mode() {
-        let input = b"dup\nunique\ndup\n".to_vec();
-        let mut cfg = PriorityConfig::new(usize::MAX, 5);
-        cfg.line_budget_only = false;
-        let arena = crate::ingest::formats::text::build_text_tree_arena_from_bytes_with_mode(
-            input,
-            &cfg,
-            true,
-        )
-        .expect("arena");
-        let build = super::build_order(&arena, &cfg).expect("order");
-        // Collect priority positions for each line token.
-        let mut positions = std::collections::HashMap::new();
-        for (pos, nid) in build.by_priority.iter().enumerate() {
-            if let Some(RankedNode::AtomicLeaf { token, .. }) =
-                build.nodes.get(nid.0)
-            {
-                positions
-                    .entry(token.clone())
-                    .or_insert_with(Vec::new)
-                    .push(pos);
-            }
-        }
-        let unique_pos = positions
-            .get("unique")
-            .and_then(|v| v.first().copied())
-            .unwrap_or(usize::MAX);
-        let dup_pos = positions
-            .get("dup")
-            .and_then(|v| v.first().copied())
-            .unwrap_or(usize::MAX);
-        assert!(
-            unique_pos < dup_pos,
-            "expected unique line to outrank duplicate line: unique at {unique_pos}, dup at {dup_pos}"
-        );
-    }
-
-    #[test]
-    fn duplicate_lines_not_penalized_across_fileset() {
-        // Two files share "dup"; each has a unique line. Cross-file duplicates should not be demoted.
-        let mut cfg = PriorityConfig::new(usize::MAX, 5);
-        cfg.line_budget_only = false;
-        let arena = crate::ingest::fileset::build_fileset_root(vec![
-            (
-                "a".to_string(),
-                crate::ingest::formats::text::build_text_tree_arena_from_bytes_with_mode(
-                    b"dup\nunique_a\n".to_vec(),
-                    &cfg,
-                    true,
-                )
-                .expect("arena"),
-            ),
-            (
-                "b".to_string(),
-                crate::ingest::formats::text::build_text_tree_arena_from_bytes_with_mode(
-                    b"dup\nunique_b\n".to_vec(),
-                    &cfg,
-                    true,
-                )
-                .expect("arena"),
-            ),
-        ]);
-        let build = super::build_order(&arena, &cfg).expect("order");
-        let mut positions = std::collections::HashMap::new();
-        for (pos, nid) in build.by_priority.iter().enumerate() {
-            if let Some(RankedNode::AtomicLeaf { token, .. }) =
-                build.nodes.get(nid.0)
-            {
-                positions
-                    .entry(token.clone())
-                    .or_insert_with(Vec::new)
-                    .push(pos);
-            }
-        }
-        let dup_pos = positions
-            .get("dup")
-            .and_then(|v| v.first().copied())
-            .unwrap_or(usize::MAX);
-        let unique_pos_a = positions
-            .get("unique_a")
-            .and_then(|v| v.first().copied())
-            .unwrap_or(usize::MAX);
-        let unique_pos_b = positions
-            .get("unique_b")
-            .and_then(|v| v.first().copied())
-            .unwrap_or(usize::MAX);
-        assert!(
-            dup_pos < unique_pos_a && dup_pos < unique_pos_b,
-            "expected cross-file duplicate to appear before uniques (no cross-file penalty): dup={dup_pos}, ua={unique_pos_a}, ub={unique_pos_b}"
-        );
-    }
-
-    #[test]
-    fn order_empty_array() {
-        let arena = crate::ingest::formats::json::build_json_tree_arena(
-            "[]",
-            &PriorityConfig::new(usize::MAX, usize::MAX),
-        )
-        .unwrap();
-        let build = super::build_order(
-            &arena,
-            &PriorityConfig::new(usize::MAX, usize::MAX),
-        )
-        .unwrap();
-        let mut items_sorted: Vec<_> = build.nodes.clone();
-        // Build a transient mapping from id -> by_priority index
-        let mut order_index = vec![usize::MAX; build.total_nodes];
-        for (idx, &pid) in build.by_priority.iter().enumerate() {
-            let pidx = pid.0;
-            if pidx < build.total_nodes {
-                order_index[pidx] = idx;
-            }
-        }
-        items_sorted.sort_by_key(|it| {
-            order_index
-                .get(it.node_id().0)
-                .copied()
-                .unwrap_or(usize::MAX)
-        });
-        let mut lines = vec![format!("len={}", build.total_nodes)];
-        for it in items_sorted {
-            lines.push(format!("{it:?}"));
-        }
-        assert_snapshot!("order_empty_array_order", lines.join("\n"));
-    }
-
-    #[test]
-    fn order_single_string_array() {
-        let arena = crate::ingest::formats::json::build_json_tree_arena(
-            "[\"ab\"]",
-            &PriorityConfig::new(usize::MAX, usize::MAX),
-        )
-        .unwrap();
-        let build = super::build_order(
-            &arena,
-            &PriorityConfig::new(usize::MAX, usize::MAX),
-        )
-        .unwrap();
-        let mut items_sorted: Vec<_> = build.nodes.clone();
-        let mut order_index = vec![usize::MAX; build.total_nodes];
-        for (idx, &pid) in build.by_priority.iter().enumerate() {
-            let pidx = pid.0;
-            if pidx < build.total_nodes {
-                order_index[pidx] = idx;
-            }
-        }
-        items_sorted.sort_by_key(|it| {
-            order_index
-                .get(it.node_id().0)
-                .copied()
-                .unwrap_or(usize::MAX)
-        });
-        let mut lines = vec![format!("len={}", build.total_nodes)];
-        for it in items_sorted {
-            lines.push(format!("{it:?}"));
-        }
-        assert_snapshot!("order_single_string_array_order", lines.join("\n"));
-    }
-
-    #[test]
-    fn code_line_length_extreme_respects_trimmed_bounds() {
-        assert!(super::code_line_length_extreme(" hi"));
-        assert!(!super::code_line_length_extreme("hello"));
-        let long_line = "x".repeat(CODE_LONG_LINE_THRESHOLD + 1);
-        assert!(super::code_line_length_extreme(&long_line));
-        let mut exact_short = " ".repeat(2);
-        exact_short.push_str("12345");
-        assert!(!super::code_line_length_extreme(&exact_short));
-    }
-
-    #[test]
-    fn code_line_is_brace_only_detection() {
-        assert!(super::code_line_is_brace_only(" }"));
-        assert!(super::code_line_is_brace_only("});"));
-        assert!(!super::code_line_is_brace_only("function demo() {"));
-    }
-
-    #[test]
-    fn code_array_is_brace_only_matches_single_child() {
-        use crate::utils::tree_arena::{JsonTreeArena, JsonTreeNode};
-        let mut arena = JsonTreeArena::default();
-        let brace_child = JsonTreeNode {
-            kind: NodeKind::Number,
-            atomic_token: Some("}".to_string()),
-            ..JsonTreeNode::default()
-        };
-        arena.nodes.push(brace_child);
-        let child_id = 0usize;
-        let children_start = arena.children.len();
-        arena.children.push(child_id);
-        let parent = JsonTreeNode {
-            kind: NodeKind::Array,
-            children_start,
-            children_len: 1,
-            ..JsonTreeNode::default()
-        };
-        arena.nodes.push(parent);
-        let array_id = 1usize;
-        assert!(super::code_array_is_brace_only(&arena, array_id));
-    }
-}
+mod tests;
