@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/demo.gif" alt="Terminal demo" width="1560" height="900" />
+<img src="https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/demo.gif" alt="Terminal demo" width="1560" height="900" />
   <br/>
 </p>
 
@@ -31,9 +31,30 @@ Available as:
     - JSON family: `strict` → strict JSON, `default` → human‑friendly Pseudo, `detailed` → JS with inline comments
     - YAML: always YAML; `strict` has no comments, `default` uses “# …”, `detailed` uses “# N more …”
     - Text: prints raw lines. In `default` style, omissions are shown as a single line `…`; in `detailed`, as `… N more lines …`. `strict` omits array‑level summaries.
-- Multiple inputs: preview many files at once with a shared or per‑file budget
+- Multiple inputs: preview many files at once with a shared or per-file budget
 - Fast: processes gigabyte‑scale files in seconds (mostly disk‑bound)
 - Available as a CLI app and as a Python library
+
+### Feature walkthrough
+
+#### Grep mode
+
+Guarantee that matching keys/values stay in view under tight budgets (supports filesets via `--glob`).
+
+![Grep demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/grep.gif)
+
+#### Tree mode
+
+Preview many files at once in a directory tree layout (inline previews, round‑robin fairness; supports filesets via `--glob`).
+
+![Tree demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/tree.gif)
+
+Regenerate locally:
+
+- Install prerequisites: `cargo install cargo-make` and `vhs` (https://github.com/charmbracelet/vhs)
+- Place tapes under docs/tapes (e.g., docs/tapes/demo.tape)
+- Run: cargo make tapes
+- Outputs are written to docs/assets/tapes
 
 ## Install
 
@@ -233,15 +254,6 @@ Machine‑readable preview (JSON family, strict style → strict JSON):
 hson -c 120 -f json -t strict users.json
 # {"users":[{"id":1,"name":"Ana","roles":["admin"]}],"meta":{"count":2}}
 ```
-
-## Terminal Demos
-
-Regenerate locally:
-
-- Place tapes under docs/tapes (e.g., docs/tapes/demo.tape)
-- Run: cargo make tapes
-- Outputs are written to docs/assets/tapes
-
 
 ## Python Bindings
 
