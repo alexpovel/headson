@@ -25,22 +25,27 @@ Available as:
 
 ## Features
 
-- Budgeted output: specify exactly how much you want to see
-ed or per-file budget
-- Fast: processes gigabyte‑scale JSON files in seconds (mostly disk‑bound)
+- Budgeted output: specify exactly how much you want to see (bytes/chars/lines; per-file and global caps)
+- Output formats: `auto | json | yaml | text` with styles `strict | default | detailed`
+- Structure-aware parsing: full JSON/YAML parsing (preserves tree shape under truncation)
+- Source code support: heuristic, indentation-aware summaries that keep lines atomic
+- Multi-file mode: preview many files at once (paths and `--glob ...`) with shared or per-file budgets
+- Repo-aware ordering: in git repos, frequent+recent files show up first (rarely touched files drift to the end; mtime fallback)
+- `grep`-like search and `tree`-like view: `--grep <regex>` and `--tree` emulate the workflows while still summarizing file contents inline
+- Fast: processes gigabyte‑scale files in seconds (mostly disk‑bound)
 - Available as a CLI app and as a Python library
 
 ### Extra features
 
 #### Grep mode
 
-Guarantee that matching keys/values stay in view under tight budgets (supports filesets via `--glob`).
+Guarantee that matching keys/values stay in view under tight budgets (supports multi-file mode via `--glob`).
 
 ![Grep demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/grep.gif)
 
 #### Tree mode
 
-Preview many files at once in a directory tree layout (inline previews, round‑robin fairness; supports filesets via `--glob`).
+Preview many files at once in a directory tree layout (inline previews, round‑robin fairness; supports multi-file mode via `--glob`).
 
 ![Tree demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/tree.gif)
 
@@ -51,6 +56,12 @@ In multi-file mode, inputs are ordered so frequently and recently touched files 
 Demo tape: `docs/tapes/sort.tape` (renders to `docs/assets/tapes/sort.gif`; `cargo make` creates a tiny temporary git repo for a deterministic demo).
 
 ![Sorting demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/sort.gif)
+
+#### Source code mode
+
+For source code files, headson uses a heuristic, indentation-aware parser to build a block hierarchy, then picks representative “interesting” lines from across that structure (while keeping lines atomic so omissions never split a line). Syntax highlighting is available when colors are enabled.
+
+![Code demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/code.gif)
 
 ## Install
 
