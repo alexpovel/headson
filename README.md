@@ -17,8 +17,8 @@
 `head`/`tail` for JSON, YAML — but structure‑aware. Get a compact preview that shows both the shape and representative values of your data, all within a strict byte budget. (Just like `head`/`tail`, `hson` can also work with unstructured text files.)
 
 Available as:
-- CLI (see [Usage](#usage))
-- Python library (see [Python Bindings](#python-bindings))
+- CLI: [Install](#install) · [Usage](#usage)
+- Python library: [Install](#python-bindings-install) · [Usage](#python-bindings-usage)
 
 ![Codecov](https://img.shields.io/codecov/c/github/kantord/headson?style=flat-square) ![Crates.io Version](https://img.shields.io/crates/v/headson?style=flat-square) ![PyPI - Version](https://img.shields.io/pypi/v/headson?style=flat-square)
 
@@ -36,6 +36,12 @@ Available as:
 - Available as a CLI app and as a Python library
 
 ### Extra features
+
+#### Source code mode
+
+For source code files, headson uses a heuristic, indentation-aware parser to build a block hierarchy, then picks representative “interesting” lines from across that structure (while keeping lines atomic so omissions never split a line). Syntax highlighting is available when colors are enabled.
+
+![Code demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/code.gif)
 
 #### Grep mode
 
@@ -57,19 +63,13 @@ Demo tape: `docs/tapes/sort.tape` (renders to `docs/assets/tapes/sort.gif`; `car
 
 ![Sorting demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/sort.gif)
 
-#### Source code mode
-
-For source code files, headson uses a heuristic, indentation-aware parser to build a block hierarchy, then picks representative “interesting” lines from across that structure (while keeping lines atomic so omissions never split a line). Syntax highlighting is available when colors are enabled.
-
-![Code demo](https://raw.githubusercontent.com/kantord/headson/main/docs/assets/tapes/code.gif)
-
 ## Install
 
 Using Cargo:
 
     cargo install headson
 
-> Note: the CLI installs as `hson`. All examples below use `hson ...`.
+> Note: the package is called `headson`, but the installed CLI command is `hson`. All examples below use `hson ...`.
 
 From source:
 
@@ -77,20 +77,56 @@ From source:
     target/release/hson --help
 
 
-## Fits into command line workflows
-
-If you’re comfortable with tools like `head` and `tail`, use `hson` when you want a quick, structured peek into a JSON file without dumping the entire thing.
-
-- `head`/`tail` operate on bytes/lines - their output is not optimized for tree structures
-- `jq`: you need to craft filters to preview large JSON files
-- `hson`: head/tail for trees—zero‑config by default; force text with `-i text` when you want raw lines
-
 ## Usage
 
     hson [FLAGS] [INPUT...]
 
 - INPUT (optional, repeatable): file path(s). If omitted, reads from stdin. Multiple input files are supported.
 - Prints the preview to stdout. On parse errors, exits non‑zero and prints an error to stderr.
+
+### Quick examples
+
+Peek a JSON stream from stdin:
+
+```bash
+curl -sS 'https://pokeapi.co/api/v2/pokemon?limit=151' | hson -c 800
+```
+
+Preview many files with a single total budget:
+
+```bash
+hson -c 200 -C 1200 logs/*.json
+```
+
+Machine-readable preview (strict JSON):
+
+```bash
+hson -c 200 -f json -t strict data.json
+```
+
+YAML with detailed comments:
+
+```bash
+hson -c 400 -f yaml -t detailed config.yaml
+```
+
+Keep matches visible (grep-like) while still summarizing structure:
+
+```bash
+hson --grep 'error|warning' -c 200 -C 1200 logs/*.json
+```
+
+Tree-like view with inline previews:
+
+```bash
+hson --tree --glob 'src/**/*' -c 160 -C 1200
+```
+
+Source code outline (keeps lines intact; omits blocks under tight budgets):
+
+```bash
+hson -n 20 src/main.py
+```
 
 Common flags:
 
@@ -184,24 +220,6 @@ Use `--tree` to render filesets as a directory tree (like `tree`) with inline st
   - Outputs stay non-empty unless you explicitly set a per-file cap of zero; in that case that slot can be suppressed entirely (matching the CLI’s `-n 0` semantics). Extremely tight nonzero caps that cannot fit even an omission marker can also yield empty output; filesets/tree may show only omission counts in that scenario.
   - When only lines are specified, no implicit byte cap applies. When neither lines nor chars are specified, a 500‑byte default applies.
 
-Quick one‑liners:
-
-- Peek a big JSON stream (keeps structure):
-
-      zstdcat huge.json.zst | hson -c 800 -f json -t default
-
-- Many files with a fixed overall size:
-
-      hson -C 1200 -f json -t strict logs/*.json
-
-- Glance at a file, JavaScript‑style comments for omissions:
-
-      hson -c 400 -f json -t detailed data.json
-
-- YAML with detailed comments:
-
-      hson -c 400 -f yaml -t detailed config.yaml
-
 ### Text mode
 
 - Single file (auto):
@@ -227,7 +245,7 @@ Show help:
 
 Note: flags align with head/tail conventions (`-c/--bytes`, `-C/--global-bytes`).
 
-## Examples: head vs hson
+## What’s wrong with just using head/tail?
 
 Input:
 
@@ -235,14 +253,14 @@ Input:
 {"users":[{"id":1,"name":"Ana","roles":["admin","dev"]},{"id":2,"name":"Bo"}],"meta":{"count":2,"source":"db"}}
 ```
 
-Naive cut (can break mid‑token):
+If you `head -c` a JSON file/stream, you can cut it in the middle of a value and end up with a confusing snippet:
 
 ```bash
 jq -c . users.json | head -c 80
 # {"users":[{"id":1,"name":"Ana","roles":["admin","dev"]},{"id":2,"name":"Bo"}],"me
 ```
 
-Structured preview with hson (JSON family, default style → Pseudo):
+With `hson`, you still get a compact preview, but it stays structure-aware:
 
 ```bash
 hson -c 120 -f json -t default users.json
@@ -255,7 +273,7 @@ hson -c 120 -f json -t default users.json
 # }
 ```
 
-Machine‑readable preview (JSON family, strict style → strict JSON):
+If you need machine-readable output, use strict mode:
 
 ```bash
 hson -c 120 -f json -t strict users.json
@@ -266,14 +284,20 @@ hson -c 120 -f json -t strict users.json
 
 A thin Python extension module is available on PyPI as `headson`.
 
-- Install: `pip install headson` (ABI3 wheels for Python 3.10+ on Linux/macOS/Windows).
-- API:
-  - `headson.summarize(text: str, *, format: str = "auto", style: str = "default", input_format: str = "json", byte_budget: int | None = None, skew: str = "balanced") -> str`
-    - `format`: `"auto" | "json" | "yaml"` (auto maps to JSON family for single inputs)
-    - `style`: `"strict" | "default" | "detailed"`
-    - `input_format`: `"json" | "yaml"` (ingestion)
-    - `byte_budget`: maximum output size in bytes (default: 500)
-    - `skew`: `"balanced" | "head" | "tail"` (affects display styles; strict JSON remains unannotated)
+### Install
+
+`pip install headson` (ABI3 wheels for Python 3.10+ on Linux/macOS/Windows).
+
+### Usage
+
+API:
+
+- `headson.summarize(text: str, *, format: str = "auto", style: str = "default", input_format: str = "json", byte_budget: int | None = None, skew: str = "balanced") -> str`
+  - `format`: `"auto" | "json" | "yaml"` (auto maps to JSON family for single inputs)
+  - `style`: `"strict" | "default" | "detailed"`
+  - `input_format`: `"json" | "yaml"` (ingestion)
+  - `byte_budget`: maximum output size in bytes (default: 500)
+  - `skew`: `"balanced" | "head" | "tail"` (affects display styles; strict JSON remains unannotated)
 
 Examples:
 
@@ -327,6 +351,11 @@ When `headson` detects a code-like file, it uses a set of additional heuristics:
  - <sup><b>[3]</b></sup> <b>Choose top N nodes (binary search)</b>: Iteratively picks N so that the rendered preview fits within the byte budget, looping between “choose N” and a render attempt to converge quickly.
  - <sup><b>[4]</b></sup> <b>Render attempt</b>: Serializes the currently included nodes using the selected template. Omission summaries and per-file section headers appear in display templates (pseudo/js); json remains strict. For arrays, display templates may insert internal gap markers between non‑contiguous kept items using original indices.
  - <sup><b>[5]</b></sup> <b>Diagram source</b>: The Algorithm diagram is generated from `docs/diagrams/algorithm.mmd`. Regenerate the SVG with `cargo make diagrams` before releasing.
+
+## Comparison with alternatives
+
+- `head`/`tail`: byte/line-based, so output often breaks structure in JSON/YAML or surfaces uninteresting details.
+- `jq`: powerful, but you usually need to write filters to get a compact preview of large JSON.
 
 ## License
 
